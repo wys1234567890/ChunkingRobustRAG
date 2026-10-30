@@ -1,0 +1,19 @@
+api:
+  llm_api_base: https://provider.example/v1
+  llm_model: example-model
+  judge_api_base: null
+  judge_model: null
+runtime:
+  temperature: 0.0
+  max_tokens: 1024
+  timeout_seconds: 60.0
+  max_retries: 3
+  concurrency: 4
+  cache_dir: results/cache
+metadata:
+  config_version: stage0-v1
+  prompt_version: rag-v1
+pricing:
+  input_per_1k: null
+  output_per_1k: null
+
