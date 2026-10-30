@@ -1,6 +1,6 @@
 # ChunkingRobustRAG
 
-仓库包含阶段 0 的 API/环境契约和阶段 1 的数据准备、证据对齐流程。研究主线使用 OpenAI-compatible Chat Completions 接口生成答案和执行 judge；embedding 保持本地 E5，避免同时改变多个实验变量。
+仓库包含阶段 0 的 API/环境契约、阶段 1 的数据准备与证据对齐，以及阶段 3 的分块与检索模块。研究主线使用 OpenAI-compatible Chat Completions 接口生成答案和执行 judge；embedding 保持本地 E5，避免同时改变多个实验变量。
 
 ## 环境
 
@@ -136,4 +136,85 @@ report = validate_dataset(directory)
 人工分别核查两个数据集的 20 条审计样本，检查答案来源、证据位置及 HotpotQA 多跳链。将审核人、结论、备注和对应 manifest 哈希记入独立的 `data/reviews/` 文件，不直接修改冻结的审计样本；发现清洗/对齐问题时修正规则，增加版本后重跑。
 
 验收统计使用字符数和空白分词数，不提前固定阶段 3 tokenizer。实验结论限于短答案、受控规模开发集语料库；NQ 文档是页面、HotpotQA 文档是段落，两者长度分布在各自 manifest 中单独报告。原始数据、生成产物和审核记录被 Git 忽略，合成测试样本随代码保存。
+
+## 阶段 3：分块与检索
+
+本阶段读取阶段 1/2 的 `documents.jsonl`，按文档生成 chunk JSONL；输入可以是干净库，也可以是带 `is_poison=true` 的事实污染库。分块只索引文档正文，不把问题、答案或证据标签拼进知识库。
+
+### 统一 chunk schema
+
+每个 chunk 输出以下字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `chunk_id` | 由文档、策略、参数、span 和文本哈希生成的稳定 ID |
+| `doc_id` | 来源文档 ID，不会跨文档拼接 |
+| `text` | 恰好等于 `document.text[start:end]` |
+| `start` / `end` | Python Unicode 字符索引，左闭右开 |
+| `is_poison` | 从源文档复制；缺失或非布尔值直接报错，避免污染文档被误当干净文档 |
+| `strategy` | `fixed`、`semantic` 或 `hierarchical` |
+| `chunk_size` | 以 tokenizer 计算的 token 预算 |
+| `overlap` | 重叠比例（0–1 之间） |
+| `tokenizer` | 实际使用的 tokenizer 名称，随 chunk 冻结 |
+| `token_count` | 该 chunk 的实际 token 数 |
+| `dataset` / `source_doc_id` / `poison_version` | 数据集与污染溯源字段，便于回连阶段 2 记录 |
+
+同一文档内不会出现空块、完全相同的 span 或跨文档串接；重叠块具有不同的 `start/end`，因此仍可区分。
+
+### 分块策略
+
+- `fixed`：按 token 窗口切分，`step = chunk_size - int(chunk_size * overlap)`。
+- `semantic`：先按句末标点和换行得到句子边界，再把完整句子装入 token 预算；超长单句回退到窗口切分。
+- `hierarchical`：优先按 Markdown 标题，其次按空行分段，先在节内保留层级，再在节内做窗口切分；不同节之间不合并。
+
+### 构建 chunk 库
+
+研究主线使用本地 E5 对应 tokenizer，保证 chunk-size 与 embedding 模型口径一致：
+
+```powershell
+python -m scripts.chunk_documents `
+  --input data/processed/clean-v1/nq/documents.jsonl `
+  --output-dir data/processed/chunks/nq `
+  --strategies fixed,semantic,hierarchical `
+  --chunk-sizes 256,512,1024,2048 `
+  --overlaps 0,0.1,0.2 `
+  --tokenizer hf:intfloat/multilingual-e5-small
+```
+
+离线冒烟测试可显式使用空白分词器；它只用于检查程序行为，不能作为研究结果：
+
+```powershell
+python -m scripts.chunk_documents `
+  --input data/processed/clean-v1/nq/documents.jsonl `
+  --output-dir data/processed/chunks/nq-smoke `
+  --strategies fixed,semantic,hierarchical `
+  --chunk-sizes 512 `
+  --overlaps 0 `
+  --tokenizer whitespace `
+  --limit 10
+```
+
+每个配置生成一个 JSONL，并写入 `manifest.json`，记录源文件哈希、tokenizer、chunk 数、输出哈希和 `chunk_config_version=stage3-v1`。更换 tokenizer、chunk-size 或 overlap 后必须重新生成并保留新版本，不能覆盖旧实验配置。
+
+### 检索
+
+BM25 与本地 E5 使用同一接口，`Top-k` 默认固定为 5：
+
+```powershell
+python -m scripts.retrieve --chunks data/processed/chunks/nq/fixed-cs512-ov00.jsonl --query "who wrote the declaration of independence" --retriever bm25
+python -m scripts.retrieve --chunks data/processed/chunks/nq/fixed-cs512-ov00.jsonl --query "who wrote the declaration of independence" --retriever e5
+python -m scripts.retrieve --chunks data/processed/chunks/nq/fixed-cs512-ov00.jsonl --queries data/processed/clean-v1/nq/queries.jsonl --retriever both --top-k 5 --output results/stage3/retrieval.jsonl
+```
+
+- BM25：`rank-bm25` Okapi，Unicode 词级切分，按分数降序、`chunk_id` 升序稳定打破平局。
+- E5：`sentence-transformers` 加载 `intfloat/multilingual-e5-small`，query 加 `query: `、chunk 加 `passage: ` 前缀，归一化后做余弦相似度。
+- 每条结果包含 `score`、`rank`、`retriever`、`retriever_version`，并保留完整 chunk 字段；版本串记录包版本和 BM25 参数或 E5 模型名。
+
+### 验收
+
+```powershell
+python -m pytest tests/test_chunking.py tests/test_retrieval.py
+```
+
+测试覆盖三种策略的 span 回读、重叠、句子边界、层级边界、污染标记、重复 ID、非法参数，以及 BM25/E5 的 Top-5 返回与稳定排序。真实 E5 首次运行会下载模型；没有本地模型时先完成 BM25 和注入式假模型测试，不要因此跳过接口验收。
 
