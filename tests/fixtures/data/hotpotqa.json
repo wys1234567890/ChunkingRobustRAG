@@ -1,0 +1,236 @@
+[
+  {
+    "_id": "synthetic-1",
+    "question": "Which city is linked to person 1?",
+    "answer": "City 1",
+    "type": "bridge",
+    "level": "hard",
+    "context": [
+      [
+        "Bridge",
+        [
+          "A shared intermediate fact.",
+          "",
+          "The relation requires another document."
+        ]
+      ],
+      [
+        "City",
+        [
+          "Person 1 is linked to City 1."
+        ]
+      ],
+      [
+        "Noise 1",
+        [
+          "An irrelevant paragraph numbered 1."
+        ]
+      ]
+    ],
+    "supporting_facts": [
+      [
+        "Bridge",
+        2
+      ],
+      [
+        "City",
+        0
+      ]
+    ]
+  },
+  {
+    "_id": "synthetic-2",
+    "question": "Which city is linked to person 2?",
+    "answer": "City 2",
+    "type": "bridge",
+    "level": "hard",
+    "context": [
+      [
+        "Bridge",
+        [
+          "A shared intermediate fact.",
+          "",
+          "The relation requires another document."
+        ]
+      ],
+      [
+        "City",
+        [
+          "Person 2 is linked to City 2."
+        ]
+      ],
+      [
+        "Noise 2",
+        [
+          "An irrelevant paragraph numbered 2."
+        ]
+      ]
+    ],
+    "supporting_facts": [
+      [
+        "Bridge",
+        2
+      ],
+      [
+        "City",
+        0
+      ]
+    ]
+  },
+  {
+    "_id": "synthetic-3",
+    "question": "Which city is linked to person 3?",
+    "answer": "City 3",
+    "type": "bridge",
+    "level": "hard",
+    "context": [
+      [
+        "Bridge",
+        [
+          "A shared intermediate fact.",
+          "",
+          "The relation requires another document."
+        ]
+      ],
+      [
+        "City",
+        [
+          "Person 3 is linked to City 3."
+        ]
+      ],
+      [
+        "Noise 3",
+        [
+          "An irrelevant paragraph numbered 3."
+        ]
+      ]
+    ],
+    "supporting_facts": [
+      [
+        "Bridge",
+        2
+      ],
+      [
+        "City",
+        0
+      ]
+    ]
+  },
+  {
+    "_id": "synthetic-4",
+    "question": "Which city is linked to person 4?",
+    "answer": "City 4",
+    "type": "bridge",
+    "level": "hard",
+    "context": [
+      [
+        "Bridge",
+        [
+          "A shared intermediate fact.",
+          "",
+          "The relation requires another document."
+        ]
+      ],
+      [
+        "City",
+        [
+          "Person 4 is linked to City 4."
+        ]
+      ],
+      [
+        "Noise 4",
+        [
+          "An irrelevant paragraph numbered 4."
+        ]
+      ]
+    ],
+    "supporting_facts": [
+      [
+        "Bridge",
+        2
+      ],
+      [
+        "City",
+        0
+      ]
+    ]
+  },
+  {
+    "_id": "synthetic-5",
+    "question": "Which city is linked to person 5?",
+    "answer": "City 5",
+    "type": "comparison",
+    "level": "hard",
+    "context": [
+      [
+        "Bridge",
+        [
+          "A shared intermediate fact.",
+          "",
+          "The relation requires another document."
+        ]
+      ],
+      [
+        "City",
+        [
+          "Person 5 is linked to City 5."
+        ]
+      ],
+      [
+        "Noise 5",
+        [
+          "An irrelevant paragraph numbered 5."
+        ]
+      ]
+    ],
+    "supporting_facts": [
+      [
+        "Bridge",
+        2
+      ],
+      [
+        "City",
+        0
+      ]
+    ]
+  },
+  {
+    "_id": "synthetic-6",
+    "question": "Which city is linked to person 6?",
+    "answer": "City 6",
+    "type": "comparison",
+    "level": "hard",
+    "context": [
+      [
+        "Bridge",
+        [
+          "A shared intermediate fact.",
+          "",
+          "The relation requires another document."
+        ]
+      ],
+      [
+        "City",
+        [
+          "Person 6 is linked to City 6."
+        ]
+      ],
+      [
+        "Noise 6",
+        [
+          "An irrelevant paragraph numbered 6."
+        ]
+      ]
+    ],
+    "supporting_facts": [
+      [
+        "Bridge",
+        2
+      ],
+      [
+        "City",
+        0
+      ]
+    ]
+  }
+]

@@ -1,0 +1,30 @@
+# Relative paths are resolved against the repository, not the shell's cwd.
+seed: 42
+data_version: clean-v1
+schema_version: data-v1
+query_count: 100
+document_count: 2000
+audit_count: 20
+max_answer_words: 16
+processed_root: data/processed
+sources:
+  nq:
+    version: v1.0-dev
+    license: CC-BY-SA-3.0
+    files:
+      - path: data/raw/nq/nq-dev-00.jsonl.gz
+        url: https://storage.googleapis.com/natural_questions/v1.0/dev/nq-dev-00.jsonl.gz
+      - path: data/raw/nq/nq-dev-01.jsonl.gz
+        url: https://storage.googleapis.com/natural_questions/v1.0/dev/nq-dev-01.jsonl.gz
+      - path: data/raw/nq/nq-dev-02.jsonl.gz
+        url: https://storage.googleapis.com/natural_questions/v1.0/dev/nq-dev-02.jsonl.gz
+      - path: data/raw/nq/nq-dev-03.jsonl.gz
+        url: https://storage.googleapis.com/natural_questions/v1.0/dev/nq-dev-03.jsonl.gz
+      - path: data/raw/nq/nq-dev-04.jsonl.gz
+        url: https://storage.googleapis.com/natural_questions/v1.0/dev/nq-dev-04.jsonl.gz
+  hotpotqa:
+    version: dev-distractor-v1
+    license: CC-BY-SA-4.0
+    files:
+      - path: data/raw/hotpotqa/hotpot_dev_distractor_v1.json
+        url: https://curtis.ml.cmu.edu/datasets/hotpot/hotpot_dev_distractor_v1.json

@@ -8,8 +8,16 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
 results/cache/
 results/logs/
 results/raw/
 *.log
+data/raw/
+data/processed/
+data/manifests/
+data/poisoned/
+data/reviews/
 

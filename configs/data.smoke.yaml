@@ -1,0 +1,20 @@
+# SYNTHETIC TEST DATA ONLY: never use these outputs as research observations.
+seed: 42
+data_version: synthetic-smoke-v2
+schema_version: data-v1
+query_count: 2
+document_count: 6
+audit_count: 2
+max_answer_words: 16
+processed_root: data/processed
+sources:
+  nq:
+    version: synthetic-original-format
+    license: synthetic-test-data
+    files:
+      - path: tests/fixtures/data/nq.jsonl
+  hotpotqa:
+    version: synthetic-original-format
+    license: synthetic-test-data
+    files:
+      - path: tests/fixtures/data/hotpotqa.json

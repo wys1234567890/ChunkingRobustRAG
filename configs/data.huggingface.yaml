@@ -1,0 +1,46 @@
+# Explicit alternative when the original Google/CMU endpoints are inaccessible.
+# Publisher repositories and immutable revisions; only development data are used.
+seed: 42
+data_version: clean-hf-v1
+schema_version: data-v1
+query_count: 100
+document_count: 2000
+audit_count: 20
+max_answer_words: 16
+processed_root: data/processed
+sources:
+  nq:
+    version: v1.0-dev-hf-e8103d566bef4154c2c12b17c6095ec5275840cc
+    license: CC-BY-SA-3.0
+    repository: google-research-datasets/natural_questions
+    revision: e8103d566bef4154c2c12b17c6095ec5275840cc
+    subset: dev
+    split: validation
+    expected_records: 7830
+    files:
+      - path: data/raw/nq-hf/validation-00000-of-00007.parquet
+        url: https://huggingface.co/datasets/google-research-datasets/natural_questions/resolve/e8103d566bef4154c2c12b17c6095ec5275840cc/dev/validation-00000-of-00007.parquet
+      - path: data/raw/nq-hf/validation-00001-of-00007.parquet
+        url: https://huggingface.co/datasets/google-research-datasets/natural_questions/resolve/e8103d566bef4154c2c12b17c6095ec5275840cc/dev/validation-00001-of-00007.parquet
+      - path: data/raw/nq-hf/validation-00002-of-00007.parquet
+        url: https://huggingface.co/datasets/google-research-datasets/natural_questions/resolve/e8103d566bef4154c2c12b17c6095ec5275840cc/dev/validation-00002-of-00007.parquet
+      - path: data/raw/nq-hf/validation-00003-of-00007.parquet
+        url: https://huggingface.co/datasets/google-research-datasets/natural_questions/resolve/e8103d566bef4154c2c12b17c6095ec5275840cc/dev/validation-00003-of-00007.parquet
+      - path: data/raw/nq-hf/validation-00004-of-00007.parquet
+        url: https://huggingface.co/datasets/google-research-datasets/natural_questions/resolve/e8103d566bef4154c2c12b17c6095ec5275840cc/dev/validation-00004-of-00007.parquet
+      - path: data/raw/nq-hf/validation-00005-of-00007.parquet
+        url: https://huggingface.co/datasets/google-research-datasets/natural_questions/resolve/e8103d566bef4154c2c12b17c6095ec5275840cc/dev/validation-00005-of-00007.parquet
+      - path: data/raw/nq-hf/validation-00006-of-00007.parquet
+        url: https://huggingface.co/datasets/google-research-datasets/natural_questions/resolve/e8103d566bef4154c2c12b17c6095ec5275840cc/dev/validation-00006-of-00007.parquet
+  hotpotqa:
+    version: dev-distractor-v1-hf-1908d6afbbead072334abe2965f91bd2709910ab
+    license: CC-BY-SA-4.0
+    repository: hotpotqa/hotpot_qa
+    revision: 1908d6afbbead072334abe2965f91bd2709910ab
+    subset: distractor
+    split: validation
+    expected_records: 7405
+    files:
+      - path: data/raw/hotpotqa-hf/validation-00000-of-00001.parquet
+        url: https://huggingface.co/datasets/hotpotqa/hotpot_qa/resolve/1908d6afbbead072334abe2965f91bd2709910ab/distractor/validation-00000-of-00001.parquet
+        sha256: c20b638ca82b21d04fe12e14ff417ad05153d4d215a65de54497fca4e972f7c6
