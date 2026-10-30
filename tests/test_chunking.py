@@ -54,6 +54,35 @@ def test_overlap_reuses_material_without_duplicate_spans(tokenizer):
     assert all(chunk.token_count <= 6 for chunk in with_overlap)
 
 
+class _BoundaryShiftTokenizer:
+    """A tokenizer whose tokenization changes when a slice starts mid-token."""
+
+    name = "boundary-shift-v1"
+
+    def spans(self, text: str) -> list[tuple[int, int]]:
+        spans: list[tuple[int, int]] = []
+        index = 0
+        while index < len(text):
+            if index % 2 == 1 and index + 1 < len(text):
+                spans.append((index, index + 2))
+                index += 2
+            else:
+                spans.append((index, index + 1))
+                index += 1
+        return spans
+
+
+@pytest.mark.parametrize("strategy", ["fixed", "hierarchical"])
+@pytest.mark.parametrize("chunk_size", [3, 4, 5])
+def test_token_budget_holds_after_slice_retokenization(strategy, chunk_size):
+    tokenizer = _BoundaryShiftTokenizer()
+    text = "the quick brown fox jumps over the lazy dog"
+    chunks = chunk_document(_document(text), strategy=strategy, chunk_size=chunk_size, overlap=0.0, tokenizer=tokenizer)
+    assert chunks
+    assert all(chunk.token_count <= chunk_size for chunk in chunks)
+    assert all(chunk.text == text[chunk.start : chunk.end] for chunk in chunks)
+
+
 def test_semantic_chunks_stop_at_sentence_boundaries(tokenizer):
     text = "Alpha beta gamma delta. Epsilon zeta eta. Theta iota kappa."
     chunks = chunk_document(_document(text), strategy="semantic", chunk_size=6, overlap=0.0, tokenizer=tokenizer)

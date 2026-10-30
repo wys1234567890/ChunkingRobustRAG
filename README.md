@@ -156,10 +156,12 @@ report = validate_dataset(directory)
 | `chunk_size` | 以 tokenizer 计算的 token 预算 |
 | `overlap` | 重叠比例（0–1 之间） |
 | `tokenizer` | 实际使用的 tokenizer 名称，随 chunk 冻结 |
-| `token_count` | 该 chunk 的实际 token 数 |
+| `token_count` | 该 chunk 文本重新分词后的实际 token 数，保证不超过 `chunk_size` |
 | `dataset` / `source_doc_id` / `poison_version` | 数据集与污染溯源字段，便于回连阶段 2 记录 |
 
 同一文档内不会出现空块、完全相同的 span 或跨文档串接；重叠块具有不同的 `start/end`，因此仍可区分。
+
+按 token 窗口切片后，片段重新分词可能比全文分词多出边界 token。生成 chunk 时会按片段自身分词结果收缩末尾，保证 `token_count <= chunk_size`；因此固定长度块的实际长度可能略小于预算。
 
 ### 分块策略
 
@@ -207,7 +209,7 @@ python -m scripts.retrieve --chunks data/processed/chunks/nq/fixed-cs512-ov00.js
 ```
 
 - BM25：`rank-bm25` Okapi，Unicode 词级切分，按分数降序、`chunk_id` 升序稳定打破平局。
-- E5：`sentence-transformers` 加载 `intfloat/multilingual-e5-small`，query 加 `query: `、chunk 加 `passage: ` 前缀，归一化后做余弦相似度。
+- E5：`sentence-transformers` 加载 `intfloat/multilingual-e5-small`，query 加 `query: `、chunk 加 `passage: ` 前缀，归一化后做余弦相似度。该模型最大输入为 512 token；`chunk_size` 为 1024/2048 时 embedding 会被截断，实验记录中必须注明，或改用支持长上下文的 embedding 模型。
 - 每条结果包含 `score`、`rank`、`retriever`、`retriever_version`，并保留完整 chunk 字段；版本串记录包版本和 BM25 参数或 E5 模型名。
 
 ### 验收

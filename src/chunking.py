@@ -156,6 +156,26 @@ def _trim(text: str, start: int, end: int) -> tuple[int, int]:
     return start, end
 
 
+def _fit_span(
+    text: str,
+    start: int,
+    end: int,
+    chunk_size: int,
+    tokenizer: Tokenizer,
+) -> tuple[int, int]:
+    """Shrink a sliced span until its own re-tokenization fits the budget."""
+
+    while True:
+        spans = tokenizer.spans(text[start:end])
+        if len(spans) <= chunk_size:
+            return start, end
+        cut = start + spans[chunk_size - 1][1]
+        new_start, new_end = _trim(text, start, cut)
+        if new_end <= new_start or new_end >= end:
+            return start, end
+        start, end = new_start, new_end
+
+
 def _validate_config(chunk_size: int, overlap: float) -> None:
     if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size <= 0:
         raise ChunkingError("chunk_size must be a positive integer")
@@ -353,6 +373,7 @@ def chunk_document(
     seen: set[tuple[int, int]] = set()
     for raw_start, raw_end in raw_spans:
         start, end = _trim(text, raw_start, raw_end)
+        start, end = _fit_span(text, start, end, chunk_size, tokenizer)
         if start >= end or (start, end) in seen:
             continue
         seen.add((start, end))
