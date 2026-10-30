@@ -5,6 +5,7 @@ from dataclasses import replace
 import pytest
 
 from src.chunking import (
+    Chunk,
     ChunkingError,
     WhitespaceTokenizer,
     build_tokenizer,
@@ -106,6 +107,25 @@ def test_hierarchical_chunks_do_not_cross_heading_boundaries(tokenizer):
     for chunk in chunks:
         assert chunk.end <= heading_start or chunk.start >= heading_start
     assert any(chunk.text.startswith("# Section Two") for chunk in chunks)
+
+
+def test_hierarchical_records_nested_section_path(tokenizer):
+    text = "# Root\nroot intro\n\n## Child\nchild detail"
+    chunks = chunk_document(_document(text), strategy="hierarchical", chunk_size=50, overlap=0.0, tokenizer=tokenizer)
+    root = next(chunk for chunk in chunks if chunk.text.startswith("# Root"))
+    child = next(chunk for chunk in chunks if chunk.text.startswith("## Child"))
+    assert root.section_path == ("Root",)
+    assert child.section_path == ("Root", "Child")
+    assert Chunk.from_dict(child.to_dict()) == child
+
+
+def test_hierarchical_differs_from_fixed_without_headings(tokenizer):
+    text = "Alpha beta. Gamma delta. Epsilon zeta."
+    fixed = chunk_document(_document(text), strategy="fixed", chunk_size=50, overlap=0.0, tokenizer=tokenizer)
+    hierarchical = chunk_document(_document(text), strategy="hierarchical", chunk_size=50, overlap=0.0, tokenizer=tokenizer)
+    assert len(fixed) == 1
+    assert len(hierarchical) > 1
+    assert all(chunk.section_path == ("body",) for chunk in hierarchical)
 
 
 def test_chunks_carry_poison_and_source_metadata(tokenizer):

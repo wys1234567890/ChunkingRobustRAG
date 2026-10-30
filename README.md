@@ -158,6 +158,7 @@ report = validate_dataset(directory)
 | `tokenizer` | 实际使用的 tokenizer 名称，随 chunk 冻结 |
 | `token_count` | 该 chunk 文本重新分词后的实际 token 数，保证不超过 `chunk_size` |
 | `dataset` / `source_doc_id` / `poison_version` | 数据集与污染溯源字段，便于回连阶段 2 记录 |
+| `section_path` | hierarchical 的层级路径，如 `["Root", "Child"]`；无标题文档记为 `["body"]`，其余策略为空 |
 
 同一文档内不会出现空块、完全相同的 span 或跨文档串接；重叠块具有不同的 `start/end`，因此仍可区分。
 
@@ -167,7 +168,7 @@ report = validate_dataset(directory)
 
 - `fixed`：按 token 窗口切分，`step = chunk_size - int(chunk_size * overlap)`。
 - `semantic`：先按句末标点和换行得到句子边界，再把完整句子装入 token 预算；超长单句回退到窗口切分。
-- `hierarchical`：优先按 Markdown 标题，其次按空行分段，先在节内保留层级，再在节内做窗口切分；不同节之间不合并。
+- `hierarchical`：解析 Markdown 标题层级，按节切分并记录父级到当前标题的 `section_path`，节内再做窗口切分；无标题时按空行分段，单段落时按句子分节。因此即使文档没有标题，hierarchical 也不会退化成 fixed。
 
 ### 构建 chunk 库
 
@@ -218,5 +219,5 @@ python -m scripts.retrieve --chunks data/processed/chunks/nq/fixed-cs512-ov00.js
 python -m pytest tests/test_chunking.py tests/test_retrieval.py
 ```
 
-测试覆盖三种策略的 span 回读、重叠、句子边界、层级边界、污染标记、重复 ID、非法参数，以及 BM25/E5 的 Top-5 返回与稳定排序。真实 E5 首次运行会下载模型；没有本地模型时先完成 BM25 和注入式假模型测试，不要因此跳过接口验收。
+测试覆盖三种策略的 span 回读、重叠、句子边界、层级边界与父级路径、无标题文档的层级退化、污染标记、重复 ID、非法参数，以及 BM25/E5 的 Top-5 返回与稳定排序。真实 E5 首次运行会下载模型；没有本地模型时先完成 BM25 和注入式假模型测试，不要因此跳过接口验收。
 

@@ -22,7 +22,7 @@ DEFAULT_TOKENIZER = "hf:intfloat/multilingual-e5-small"
 CHUNK_CONFIG_VERSION = "stage3-v1"
 
 _WHITESPACE = re.compile(r"\S+")
-_HEADING = re.compile(r"(?m)^(#{1,6})\s+\S.*$")
+_HEADING = re.compile(r"(?m)^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
 _PARAGRAPH = re.compile(r"(?m)(?:[^\n]+\n?)+")
 _TERMINATORS = ".!?。！？"
 
@@ -96,6 +96,7 @@ class Chunk:
     dataset: str = ""
     source_doc_id: str = ""
     poison_version: str | None = None
+    section_path: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -113,6 +114,7 @@ class Chunk:
             "dataset": self.dataset,
             "source_doc_id": self.source_doc_id,
             "poison_version": self.poison_version,
+            "section_path": list(self.section_path),
         }
 
     @classmethod
@@ -120,6 +122,9 @@ class Chunk:
         poison = value.get("is_poison")
         if not isinstance(poison, bool):
             raise ChunkingError("chunk is_poison must be a boolean")
+        raw_path = value.get("section_path", [])
+        if not isinstance(raw_path, list) or not all(isinstance(item, str) for item in raw_path):
+            raise ChunkingError("chunk section_path must be a list of strings")
         try:
             chunk = cls(
                 chunk_id=str(value["chunk_id"]),
@@ -136,6 +141,7 @@ class Chunk:
                 dataset=str(value.get("dataset", "")),
                 source_doc_id=str(value.get("source_doc_id", value["doc_id"])),
                 poison_version=value.get("poison_version"),
+                section_path=tuple(raw_path),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ChunkingError(f"invalid chunk record: {exc}") from exc
@@ -292,24 +298,60 @@ def _semantic_spans(text: str, chunk_size: int, overlap: float, tokenizer: Token
     return spans
 
 
-def _section_spans(text: str) -> list[tuple[int, int]]:
+@dataclass(frozen=True)
+class _Section:
+    start: int
+    end: int
+    path: tuple[str, ...]
+
+
+def _fallback_sections(text: str) -> list[_Section]:
+    paragraphs = [
+        _Section(match.start(), match.end(), ("body",))
+        for match in _PARAGRAPH.finditer(text)
+        if match.group().strip()
+    ]
+    if len(paragraphs) > 1:
+        return paragraphs
+    sentences = _sentence_spans(text)
+    if len(sentences) > 1:
+        return [_Section(start, end, ("body",)) for start, end in sentences]
+    return [_Section(0, len(text), ("body",))]
+
+
+def _section_spans(text: str) -> list[_Section]:
     headings = list(_HEADING.finditer(text))
-    if headings:
-        sections: list[tuple[int, int]] = []
-        if text[: headings[0].start()].strip():
-            sections.append((0, headings[0].start()))
-        for position, heading in enumerate(headings):
-            end = headings[position + 1].start() if position + 1 < len(headings) else len(text)
-            sections.append((heading.start(), end))
-        return sections
-    paragraphs = [match.span() for match in _PARAGRAPH.finditer(text) if match.group().strip()]
-    return paragraphs or [(0, len(text))]
+    if not headings:
+        return _fallback_sections(text)
+
+    sections: list[_Section] = []
+    if text[: headings[0].start()].strip():
+        sections.append(_Section(0, headings[0].start(), ()))
+    stack: list[tuple[int, str]] = []
+    for position, heading in enumerate(headings):
+        level = len(heading.group(1))
+        title = heading.group(2).strip().strip("#").strip()
+        while stack and stack[-1][0] >= level:
+            stack.pop()
+        path = tuple(item[1] for item in stack) + (title,)
+        end = headings[position + 1].start() if position + 1 < len(headings) else len(text)
+        start, end = _trim(text, heading.start(), end)
+        if start < end:
+            sections.append(_Section(start, end, path))
+        stack.append((level, title))
+    return sections
 
 
-def _hierarchical_spans(text: str, chunk_size: int, overlap: float, tokenizer: Tokenizer) -> list[tuple[int, int]]:
-    spans: list[tuple[int, int]] = []
-    for start, end in _section_spans(text):
-        spans.extend(_fixed_in_range(text, start, end, chunk_size, overlap, tokenizer))
+def _hierarchical_spans(
+    text: str,
+    chunk_size: int,
+    overlap: float,
+    tokenizer: Tokenizer,
+) -> list[tuple[int, int, tuple[str, ...]]]:
+    spans: list[tuple[int, int, tuple[str, ...]]] = []
+    for section in _section_spans(text):
+        for start, end in _fixed_in_range(text, section.start, section.end, chunk_size, overlap, tokenizer):
+            spans.append((start, end, section.path))
     return spans
 
 
@@ -363,15 +405,15 @@ def chunk_document(
 
     tokenizer = tokenizer or build_tokenizer()
     if strategy == "fixed":
-        raw_spans = _fixed_spans(text, chunk_size, overlap, tokenizer)
+        raw_spans = [(start, end, ()) for start, end in _fixed_spans(text, chunk_size, overlap, tokenizer)]
     elif strategy == "semantic":
-        raw_spans = _semantic_spans(text, chunk_size, overlap, tokenizer)
+        raw_spans = [(start, end, ()) for start, end in _semantic_spans(text, chunk_size, overlap, tokenizer)]
     else:
         raw_spans = _hierarchical_spans(text, chunk_size, overlap, tokenizer)
 
     chunks: list[Chunk] = []
     seen: set[tuple[int, int]] = set()
-    for raw_start, raw_end in raw_spans:
+    for raw_start, raw_end, section_path in raw_spans:
         start, end = _trim(text, raw_start, raw_end)
         start, end = _fit_span(text, start, end, chunk_size, tokenizer)
         if start >= end or (start, end) in seen:
@@ -395,6 +437,7 @@ def chunk_document(
                 dataset=str(dataset if dataset is not None else _value(document, "dataset", "")),
                 source_doc_id=str(_value(document, "source_doc_id", doc_id)),
                 poison_version=_value(document, "poison_version"),
+                section_path=section_path,
             )
         )
     return chunks
