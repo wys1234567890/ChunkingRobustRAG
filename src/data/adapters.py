@@ -43,6 +43,7 @@ def _query(dataset: str, identifier: str, question: str, answers: list[str], doc
         "evidence_doc_ids": sorted({item["doc_id"] for item in evidence}),
         "hard_negative_doc_ids": [],
         "related_doc_ids": sorted(set(docs) | {item["doc_id"] for item in evidence}),
+        "hard_negative_quality": None,
         "data_version": settings.data_version, "schema_version": settings.schema_version,
         **extra,
     }

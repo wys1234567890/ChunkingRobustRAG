@@ -1,9 +1,10 @@
-"""Public JSONL loaders and strict cross-file verification for clean-v1 data."""
+"""Public JSONL loaders and strict cross-file verification for prepared data."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 from pathlib import Path
 
 from .common import DataError, answer_key, contains_answer, digest, file_sha256, read_jsonl
@@ -23,7 +24,7 @@ def _string(value: object) -> bool:
 
 def _versions(record: dict) -> None:
     _require(record.get("dataset", "nq") in ("nq", "hotpotqa"), "unknown dataset")
-    _require(record.get("schema_version") == "data-v1", "invalid schema_version")
+    _require(record.get("schema_version") in {"data-v1", "data-v2"}, "invalid schema_version")
     _require(_string(record.get("data_version")), "missing data_version")
 
 
@@ -61,6 +62,14 @@ def _check_query(query: dict) -> None:
     _require(set(query["evidence_doc_ids"]) <= set(query["related_doc_ids"]), "evidence missing from related documents")
     _require(set(query["hard_negative_doc_ids"]) <= set(query["related_doc_ids"]), "hard negative missing from related documents")
     _require(set(query["evidence_doc_ids"]) & set(query["hard_negative_doc_ids"]) == set(), "evidence also marked hard negative")
+    if query.get("schema_version") == "data-v2":
+        quality = query.get("hard_negative_quality")
+        _require(isinstance(quality, dict), "missing hard_negative_quality")
+        _require(isinstance(quality.get("anchor_terms"), list) and all(_string(item) for item in quality["anchor_terms"]), "invalid hard_negative_quality anchor_terms")
+        _require(_string(quality.get("question_type")), "invalid hard_negative_quality question_type")
+        _require(type(quality.get("active_hard_negative_count")) is int, "invalid active hard negative count")
+        for key in ("min_query_e5_cosine", "min_evidence_e5_cosine"):
+            _require(type(quality.get(key)) in (int, float) and 0.0 <= quality[key] <= 1.0, f"invalid hard_negative_quality {key}")
 
 
 def _check_evidence(evidence: dict) -> None:
@@ -134,8 +143,15 @@ def validate_records(documents: list[dict], queries: list[dict], evidence: list[
         _require(set(query["hard_negative_doc_ids"]) <= docs.keys(), "dangling hard negative reference")
         _require(set(query["related_doc_ids"]) <= docs.keys(), "dangling related document reference")
         _require(set(query["hard_negative_doc_ids"]) & set(query["context_doc_ids"]) == set(), "hard negative is a context document")
+        if query.get("schema_version") == "data-v2":
+            _require(set(query["related_doc_ids"]) == set(query["evidence_doc_ids"]) | set(query["hard_negative_doc_ids"]), "related documents must equal evidence plus hard negatives")
         for doc_id in query["hard_negative_doc_ids"]:
             _require(not contains_answer(docs[doc_id]["text"], query["ground_truth"]), "hard negative contains ground truth")
+            if query.get("schema_version") == "data-v2":
+                _require(docs[doc_id]["document_role"] == "hard_negative", "hard negative document has the wrong role")
+        if query.get("schema_version") == "data-v2":
+            for doc_id in query["evidence_doc_ids"]:
+                _require(docs[doc_id]["document_role"] == "evidence", "evidence document has the wrong role")
         _require(all(docs[doc_id]["dataset"] == query["dataset"] for doc_id in query["context_doc_ids"]), "cross-dataset query context")
         _require(all(any(ref["source_query_id"] == query["source_query_id"] for ref in docs[doc_id]["source_refs"]) for doc_id in query["context_doc_ids"]), "query context does not belong to source question")
         if query["dataset"] == "nq":
@@ -179,6 +195,12 @@ def validate_dataset(directory: str | Path, *, expected_config: dict | None = No
     hard_negative_count = config.get("hard_negative_count", 0)
     _require(type(hard_negative_count) is int and hard_negative_count >= 0, "invalid hard_negative_count")
     _require(all(len(query["hard_negative_doc_ids"]) == hard_negative_count for query in queries), "hard negative count mismatch")
+    if config.get("schema_version") == "data-v2" and hard_negative_count:
+        active_min = config.get("hard_negative_min_active", 0)
+        _require(all(query["hard_negative_quality"]["active_hard_negative_count"] >= active_min for query in queries), "inactive hard negative competition")
+        _require(all(query["hard_negative_quality"]["min_query_e5_cosine"] >= config.get("hard_negative_min_query_cosine", 1.0) for query in queries), "query E5 similarity below threshold")
+        _require(all(query["hard_negative_quality"]["min_evidence_e5_cosine"] >= config.get("hard_negative_min_evidence_cosine", 1.0) for query in queries), "evidence E5 similarity below threshold")
+        _require(manifest.get("sampling", {}).get("allocated_question_types") == dict(Counter(query["question_type"] for query in queries)), "question-type allocation does not match selected queries")
     _require(all(item["data_version"] == config.get("data_version") and item["schema_version"] == config.get("schema_version") for item in docs + queries + evidence), "manifest version mismatch")
     _require(all(item["dataset"] == manifest.get("dataset") for item in docs + queries), "manifest dataset mismatch")
     _require(manifest.get("sampled_query_ids") == sorted(item["query_id"] for item in queries), "manifest query selection mismatch")
@@ -193,8 +215,68 @@ def validate_dataset(directory: str | Path, *, expected_config: dict | None = No
         _require(audit.get("review_status") == "pending", "generated audits must not claim human approval")
     _require(manifest.get("validation") == report, "manifest validation report mismatch")
     hard_negative_ids = {doc_id for query in queries for doc_id in query["hard_negative_doc_ids"]}
+    all_context_ids = {doc_id for query in queries for doc_id in query["context_doc_ids"]}
+    _require(hard_negative_ids.isdisjoint(all_context_ids), "hard negative document is used as a selected query context")
     _require(all(doc["document_role"] != "hard_negative" or doc["doc_id"] in hard_negative_ids for doc in docs), "unreferenced hard negative document")
     _require(all(doc["doc_id"] not in hard_negative_ids or set(doc["target_query_ids"]) >= {query["query_id"] for query in queries if doc["doc_id"] in query["hard_negative_doc_ids"]} for doc in docs), "hard negative target query mismatch")
+    if config.get("schema_version") == "data-v2" and hard_negative_count:
+        evidence_ids = {doc_id for query in queries for doc_id in query["evidence_doc_ids"]}
+        expected_targets = {
+            doc["doc_id"]: sorted(
+                query["query_id"] for query in queries
+                if doc["doc_id"] in set(query["evidence_doc_ids"]) | set(query["hard_negative_doc_ids"])
+            )
+            for doc in docs
+        }
+        for doc in docs:
+            expected_role = "evidence" if doc["doc_id"] in evidence_ids else "hard_negative" if doc["doc_id"] in hard_negative_ids else "background"
+            _require(doc["document_role"] == expected_role, "document role does not match selected-query references")
+            _require(doc["target_query_ids"] == expected_targets[doc["doc_id"]], "document target query ids mismatch")
+        hn_report = manifest.get("hard_negative")
+        _require(isinstance(hn_report, dict), "missing hard-negative audit report")
+        candidate_audit = hn_report.get("candidate_audit")
+        _require(isinstance(candidate_audit, list), "missing hard-negative candidate audit")
+        candidate_pairs_all = [(item.get("query_id"), item.get("doc_id")) for item in candidate_audit]
+        _require(len(candidate_pairs_all) == len(set(candidate_pairs_all)), "duplicate hard-negative candidate audit entry")
+        final_competition = hn_report.get("final_corpus_competition")
+        _require(isinstance(final_competition, dict), "missing final-corpus competition audit")
+        selections = hn_report.get("selections")
+        _require(isinstance(selections, list), "missing hard-negative selection audit")
+        candidate_pairs = {
+            (item.get("query_id"), item.get("doc_id")): item
+            for item in candidate_audit
+            if item.get("selection_status") == "selected"
+        }
+        by_pair = {(item.get("query_id"), item.get("doc_id")): item for item in selections}
+        _require(len(by_pair) == len(selections), "duplicate hard-negative audit entry")
+        _require(all(pair in candidate_pairs for pair in by_pair), "selected hard-negative missing candidate audit")
+        reuse = Counter(item["doc_id"] for item in selections)
+        _require(hn_report.get("unique_hard_negative_documents") == len(reuse), "hard-negative reuse document count mismatch")
+        _require(hn_report.get("hard_negative_reuse_count") == sum(amount - 1 for amount in reuse.values()), "hard-negative reuse count mismatch")
+        _require(hn_report.get("per_query_hard_negative_count") == {query["query_id"]: hard_negative_count for query in queries}, "per-query hard-negative count audit mismatch")
+        from .pipeline import build_bm25_index, build_candidate_pool, rank_retrieval_competition
+        final_pool = build_candidate_pool(docs, set())
+        final_index = build_bm25_index(final_pool, [query["question"] for query in queries])
+        for query in queries:
+            competition = final_competition.get(query["query_id"])
+            _require(isinstance(competition, dict), "final-corpus competition audit missing")
+            actual_competition = rank_retrieval_competition(
+                final_index, query["question"], final_pool,
+                set(query["evidence_doc_ids"]), set(query["hard_negative_doc_ids"]),
+                config["hard_negative_active_top_k"],
+            )
+            _require(competition == actual_competition, "final-corpus competition audit does not match documents")
+            _require(competition.get("active_hard_negative_count", 0) >= config.get("hard_negative_min_active", 0), "final-corpus hard-negative competition below threshold")
+            _require(set(competition.get("hard_negative_bm25_ranks", {})) == set(query["hard_negative_doc_ids"]), "final-corpus hard-negative rank audit mismatch")
+            selected = [by_pair.get((query["query_id"], doc_id)) for doc_id in query["hard_negative_doc_ids"]]
+            _require(all(item is not None for item in selected), "hard-negative audit entry missing")
+            quality = query["hard_negative_quality"]
+            _require(sorted(candidate_pairs[(query["query_id"], doc_id)]["anchor_terms"] for doc_id in query["hard_negative_doc_ids"]) == sorted([quality["anchor_terms"]] * hard_negative_count), "hard-negative anchor audit mismatch")
+            _require(sum(item["active_in_bm25_top20"] is True for item in selected) == quality["active_hard_negative_count"], "active hard-negative audit mismatch")
+            _require(min(item["query_e5_cosine"] for item in selected) == quality["min_query_e5_cosine"], "query E5 audit mismatch")
+            _require(min(item["evidence_e5_cosine"] for item in selected) == quality["min_evidence_e5_cosine"], "evidence E5 audit mismatch")
+        model = manifest.get("hard_negative_e5_model")
+        _require(isinstance(model, dict) and _string(model.get("name")) and isinstance(model.get("sha256"), str) and len(model["sha256"]) == 64, "missing hard-negative E5 model fingerprint")
     _require(all(max(len(answer.split()) for answer in item["ground_truth"]) <= config.get("max_answer_words", 0) for item in queries), "answer exceeds configured word limit")
     _require(all(answer_key(answer) not in {"yes", "no"} for item in queries for answer in item["ground_truth"]), "yes/no answer in short-answer subset")
     return {"dataset": manifest["dataset"], "data_version": config["data_version"], "status": "validated", "human_review_status": manifest.get("human_review_status"), **report}
