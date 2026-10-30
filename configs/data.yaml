@@ -1,11 +1,12 @@
 # Relative paths are resolved against the repository, not the shell's cwd.
 seed: 42
-data_version: clean-v1
+data_version: clean-v3-hardneg
 schema_version: data-v1
 query_count: 100
 document_count: 2000
 audit_count: 20
 max_answer_words: 16
+hard_negative_count: 4
 processed_root: data/processed
 sources:
   nq:

@@ -28,6 +28,7 @@ def _document(dataset: str, title: str, text: str, source: dict, settings: DataS
         "doc_id": identifier, "dataset": dataset, "title": title, "text": text,
         "source_doc_id": identifier, "source_refs": [source],
         "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "document_role": "candidate",
         "is_poison": False, "corruption_type": None, "true_fact": None,
         "false_fact": None, "target_query_ids": [], "poison_version": settings.data_version,
         "data_version": settings.data_version, "schema_version": settings.schema_version,
@@ -40,6 +41,8 @@ def _query(dataset: str, identifier: str, question: str, answers: list[str], doc
         "source_query_id": identifier, "question": normalize_inline(question),
         "ground_truth": sorted(set(answers)), "context_doc_ids": sorted(set(docs)),
         "evidence_doc_ids": sorted({item["doc_id"] for item in evidence}),
+        "hard_negative_doc_ids": [],
+        "related_doc_ids": sorted(set(docs) | {item["doc_id"] for item in evidence}),
         "data_version": settings.data_version, "schema_version": settings.schema_version,
         **extra,
     }

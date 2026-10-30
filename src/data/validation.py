@@ -6,7 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from .common import DataError, answer_key, digest, file_sha256, read_jsonl
+from .common import DataError, answer_key, contains_answer, digest, file_sha256, read_jsonl
 
 
 DATA_FILES = ("documents.jsonl", "queries.jsonl", "evidence.jsonl", "audit_samples.jsonl")
@@ -37,9 +37,10 @@ def _check_document(doc: dict) -> None:
         _require(_string(doc.get(key)), f"document missing {key}")
     _require(isinstance(doc.get("title"), str), "document title must be a string")
     _require(doc.get("source_doc_id") == doc["doc_id"], "clean source_doc_id must equal doc_id")
+    _require(doc.get("document_role") in {"candidate", "evidence", "hard_negative", "background", "poison"}, "invalid document_role")
     _require(doc.get("is_poison") is False, "clean document is_poison must be false")
     _require(all(key in doc and doc[key] is None for key in ("corruption_type", "true_fact", "false_fact")), "clean document contains pollution metadata")
-    _require(doc.get("target_query_ids") == [], "clean target_query_ids must be empty")
+    _require(_string_list(doc.get("target_query_ids"), nonempty=False), "invalid target_query_ids")
     _require(doc.get("poison_version") == doc["data_version"], "clean poison_version mismatch")
     _require(isinstance(doc.get("source_refs"), list) and bool(doc["source_refs"]), "document requires source_refs")
     for ref in doc["source_refs"]:
@@ -55,6 +56,11 @@ def _check_query(query: dict) -> None:
     _require(query["query_id"] == f"{query['dataset']}-{query['source_query_id']}", "query identity mismatch")
     for key in ("ground_truth", "evidence_doc_ids", "context_doc_ids"):
         _require(_string_list(query.get(key)), f"invalid query {key}")
+    for key in ("hard_negative_doc_ids", "related_doc_ids"):
+        _require(_string_list(query.get(key), nonempty=False), f"invalid query {key}")
+    _require(set(query["evidence_doc_ids"]) <= set(query["related_doc_ids"]), "evidence missing from related documents")
+    _require(set(query["hard_negative_doc_ids"]) <= set(query["related_doc_ids"]), "hard negative missing from related documents")
+    _require(set(query["evidence_doc_ids"]) & set(query["hard_negative_doc_ids"]) == set(), "evidence also marked hard negative")
 
 
 def _check_evidence(evidence: dict) -> None:
@@ -125,6 +131,11 @@ def validate_records(documents: list[dict], queries: list[dict], evidence: list[
         _require(bool(items), "query has no evidence")
         _require(set(query["evidence_doc_ids"]) == {item["doc_id"] for item in items}, "query evidence_doc_ids mismatch")
         _require(set(query["evidence_doc_ids"]) <= set(query["context_doc_ids"]) <= docs.keys(), "dangling query context reference")
+        _require(set(query["hard_negative_doc_ids"]) <= docs.keys(), "dangling hard negative reference")
+        _require(set(query["related_doc_ids"]) <= docs.keys(), "dangling related document reference")
+        _require(set(query["hard_negative_doc_ids"]) & set(query["context_doc_ids"]) == set(), "hard negative is a context document")
+        for doc_id in query["hard_negative_doc_ids"]:
+            _require(not contains_answer(docs[doc_id]["text"], query["ground_truth"]), "hard negative contains ground truth")
         _require(all(docs[doc_id]["dataset"] == query["dataset"] for doc_id in query["context_doc_ids"]), "cross-dataset query context")
         _require(all(any(ref["source_query_id"] == query["source_query_id"] for ref in docs[doc_id]["source_refs"]) for doc_id in query["context_doc_ids"]), "query context does not belong to source question")
         if query["dataset"] == "nq":
@@ -165,6 +176,9 @@ def validate_dataset(directory: str | Path, *, expected_config: dict | None = No
     if expected_config is not None:
         _require(config == expected_config, "frozen dataset configuration changed; choose a new data_version")
     _require(len(docs) == config.get("document_count") and len(queries) == config.get("query_count"), "dataset count mismatch")
+    hard_negative_count = config.get("hard_negative_count", 0)
+    _require(type(hard_negative_count) is int and hard_negative_count >= 0, "invalid hard_negative_count")
+    _require(all(len(query["hard_negative_doc_ids"]) == hard_negative_count for query in queries), "hard negative count mismatch")
     _require(all(item["data_version"] == config.get("data_version") and item["schema_version"] == config.get("schema_version") for item in docs + queries + evidence), "manifest version mismatch")
     _require(all(item["dataset"] == manifest.get("dataset") for item in docs + queries), "manifest dataset mismatch")
     _require(manifest.get("sampled_query_ids") == sorted(item["query_id"] for item in queries), "manifest query selection mismatch")
@@ -178,6 +192,9 @@ def validate_dataset(directory: str | Path, *, expected_config: dict | None = No
         _require(audit.get("evidence") == expected, "audit evidence mismatch")
         _require(audit.get("review_status") == "pending", "generated audits must not claim human approval")
     _require(manifest.get("validation") == report, "manifest validation report mismatch")
+    hard_negative_ids = {doc_id for query in queries for doc_id in query["hard_negative_doc_ids"]}
+    _require(all(doc["document_role"] != "hard_negative" or doc["doc_id"] in hard_negative_ids for doc in docs), "unreferenced hard negative document")
+    _require(all(doc["doc_id"] not in hard_negative_ids or set(doc["target_query_ids"]) >= {query["query_id"] for query in queries if doc["doc_id"] in query["hard_negative_doc_ids"]} for doc in docs), "hard negative target query mismatch")
     _require(all(max(len(answer.split()) for answer in item["ground_truth"]) <= config.get("max_answer_words", 0) for item in queries), "answer exceeds configured word limit")
     _require(all(answer_key(answer) not in {"yes", "no"} for item in queries for answer in item["ground_truth"]), "yes/no answer in short-answer subset")
     return {"dataset": manifest["dataset"], "data_version": config["data_version"], "status": "validated", "human_review_status": manifest.get("human_review_status"), **report}

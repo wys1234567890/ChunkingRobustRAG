@@ -4,21 +4,42 @@ from __future__ import annotations
 
 import json
 import math
+import re
+import shutil
 import sqlite3
 import subprocess
-import tempfile
-from collections import Counter
+import uuid
+from collections import Counter, defaultdict
+from contextlib import contextmanager
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable
 
 from .adapters import adapt_hotpotqa, adapt_nq
-from .common import DataError, answer_key, canonical_json, digest, file_sha256, rank, write_json, write_jsonl
+from .common import DataError, answer_key, canonical_json, contains_answer, digest, file_sha256, normalize_inline, rank, write_json, write_jsonl
 from .config import DataSettings
 from .sources import acquire_sources, iter_source
 from .validation import DATA_FILES, validate_dataset, validate_records
 
 
 PREPARER_VERSION = "data-preparation-v1"
+
+
+@contextmanager
+def _staging_directory(parent: Path, dataset: str):
+    """Create a staging directory with inherited workspace ACLs on Windows.
+
+    tempfile.TemporaryDirectory creates owner-only ACLs on Windows. Renaming
+    that directory into the published tree would make the generated dataset
+    unreadable to another workspace user, so create it with normal inherited
+    permissions instead.
+    """
+    staging = parent / f".{dataset}-{uuid.uuid4().hex}"
+    staging.mkdir(mode=0o777)
+    try:
+        yield staging
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def _code_identity(settings: DataSettings) -> dict:
@@ -48,13 +69,75 @@ def _summary(values: list[int]) -> dict:
 
 def _statistics(documents: list[dict], queries: list[dict], evidence: list[dict]) -> dict:
     evidence_counts = Counter(item["query_id"] for item in evidence)
+    hard_negative_counts = [len(item.get("hard_negative_doc_ids", [])) for item in queries]
+    related_counts = [len(item.get("related_doc_ids", [])) for item in queries]
     return {
         "document_chars": _summary([len(item["text"]) for item in documents]),
         "document_words": _summary([len(item["text"].split()) for item in documents]),
         "answer_words": _summary([max(len(answer.split()) for answer in item["ground_truth"]) for item in queries]),
         "evidence_per_query": _summary([evidence_counts[item["query_id"]] for item in queries]),
+        "hard_negatives_per_query": _summary(hard_negative_counts),
+        "related_documents_per_query": _summary(related_counts),
+        "document_roles": dict(sorted(Counter(item.get("document_role", "background") for item in documents).items())),
         "question_types": dict(sorted(Counter(item["question_type"] for item in queries).items())),
     }
+
+
+_TOKEN_RE = re.compile(r"[\w]+", re.UNICODE)
+
+
+def _tokens(text: str) -> list[str]:
+    return _TOKEN_RE.findall(normalize_inline(text).casefold())
+
+
+def _selection_tokens(document: dict) -> list[str]:
+    # Candidate ranking does not need every token in a long Wikipedia page.
+    # Keeping the title and a bounded prefix makes the full-dev-set scan
+    # practical while the published document remains unchanged.
+    return _tokens(f"{document['title']} {document['text'][:4096]}")
+
+
+def _bm25_candidate_scores(query_tokens: list[str], corpus_tokens: list[list[str]]) -> dict[int, float]:
+    if not query_tokens or not corpus_tokens:
+        return {}
+    k1, b = 1.5, 0.75
+    n = len(corpus_tokens)
+    average_length = sum(len(item) for item in corpus_tokens) / n
+    query_terms = Counter(query_tokens)
+    postings: dict[str, set[int]] = defaultdict(set)
+    for index, tokens in enumerate(corpus_tokens):
+        for term in set(tokens) & set(query_terms):
+            postings[term].add(index)
+    document_frequency = {term: len(postings[term]) for term in query_terms}
+    candidate_indexes = set().union(*(postings[term] for term in query_terms if postings[term]))
+    scores: dict[int, float] = {}
+    for index in candidate_indexes:
+        frequencies = Counter(corpus_tokens[index])
+        length = len(corpus_tokens[index])
+        score = 0.0
+        for term, qtf in query_terms.items():
+            df = document_frequency[term]
+            tf = frequencies[term]
+            if not tf:
+                continue
+            idf = math.log(1.0 + (n - df + 0.5) / (df + 0.5))
+            denominator = tf + k1 * (1.0 - b + b * length / average_length)
+            score += idf * (tf * (k1 + 1.0) / denominator)
+        scores[index] = score
+    return scores
+
+
+def _near_duplicate(text: str, evidence_texts: list[str]) -> bool:
+    candidate = " ".join(_tokens(text))
+    if not candidate:
+        return True
+    for evidence in evidence_texts:
+        reference = " ".join(_tokens(evidence))
+        if candidate == reference:
+            return True
+        if min(len(candidate), len(reference)) >= 40 and SequenceMatcher(None, candidate, reference).ratio() >= 0.95:
+            return True
+    return False
 
 
 class _StagingStore:
@@ -122,6 +205,78 @@ class _StagingStore:
                 documents[identifier] = json.loads(payload)
         return [documents[key] for key in sorted(documents)]
 
+    def all_documents(self) -> list[dict]:
+        return [json.loads(payload) for payload, in self.connection.execute("SELECT payload FROM documents ORDER BY id")]
+
+    def choose_hard_negatives(
+        self, queries: list[dict], count: int
+    ) -> tuple[dict[str, list[str]], dict[str, object]]:
+        """Select deterministic lexical near-neighbours from the full source pool.
+
+        All selected-question context documents are excluded globally, so a
+        document has one unambiguous role in the published corpus. A clean
+        candidate may serve as a hard negative for more than one query.
+        """
+        if count == 0:
+            return {query["query_id"]: [] for query in queries}, {
+                "enabled": False, "requested_per_query": 0,
+                "candidate_shortfalls": [], "selections": [],
+            }
+        pool = self.all_documents()
+        globally_excluded = {doc_id for query in queries for doc_id in query["context_doc_ids"]}
+        candidate_docs = [doc for doc in pool if doc["doc_id"] not in globally_excluded]
+        corpus_tokens = [_selection_tokens(doc) for doc in candidate_docs]
+        selected: dict[str, list[str]] = {}
+        selections: list[dict] = []
+        shortfalls: list[dict] = []
+        for query in sorted(queries, key=lambda item: item["query_id"]):
+            answer_fragments = query["ground_truth"]
+            excluded = set(query["context_doc_ids"])
+            evidence_texts = [
+                doc["text"] for doc in pool if doc["doc_id"] in set(query["evidence_doc_ids"])
+            ]
+            query_tokens = _tokens(query["question"])
+            score_map = _bm25_candidate_scores(query_tokens, corpus_tokens)
+            ranked = sorted(
+                ((score_map[index], candidate_docs[index]) for index in score_map),
+                key=lambda item: (-item[0], item[1]["doc_id"]),
+            )
+            picked: list[str] = []
+            for score, doc in ranked:
+                if doc["doc_id"] in excluded:
+                    continue
+                if score <= 0:
+                    continue
+                if contains_answer(doc["text"], answer_fragments):
+                    continue
+                if _near_duplicate(doc["text"], evidence_texts):
+                    continue
+                if doc["doc_id"] in picked:
+                    continue
+                picked.append(doc["doc_id"])
+                selections.append({
+                    "query_id": query["query_id"], "doc_id": doc["doc_id"],
+                    "score": round(float(score), 8),
+                    "reason": "bm25_query_overlap_without_answer_or_evidence_duplicate",
+                })
+                if len(picked) == count:
+                    break
+            if len(picked) != count:
+                shortfalls.append({
+                    "query_id": query["query_id"],
+                    "requested": count, "available": len(picked),
+                })
+            selected[query["query_id"]] = picked
+        if shortfalls:
+            details = ", ".join(f"{item['query_id']} ({item['available']}/{item['requested']})" for item in shortfalls)
+            raise DataError(f"insufficient hard-negative candidates: {details}")
+        return selected, {
+            "enabled": True, "requested_per_query": count,
+            "candidate_pool_documents": len(candidate_docs),
+            "candidate_shortfalls": shortfalls,
+            "selections": selections,
+        }
+
 
 def prepare_dataset(
     settings: DataSettings, dataset: str, *, offline: bool = False,
@@ -138,8 +293,7 @@ def prepare_dataset(
             raise DataError(f"{destination}: frozen inputs/configuration/code changed; choose a new data_version")
         return {**report, "reused": True, "output_dir": str(destination)}
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=f".{dataset}-", dir=destination.parent) as temporary:
-        staging = Path(temporary)
+    with _staging_directory(destination.parent, dataset) as staging:
         store = _StagingStore(staging / "staging.sqlite")
         counts = Counter()
         rejected = Counter()
@@ -170,8 +324,32 @@ def prepare_dataset(
             selected, sampling = store.choose_queries(settings)
             queries = [row["query"] for row in selected]
             evidence = sorted((item for row in selected for item in row["evidence"]), key=lambda item: item["evidence_id"])
+            hard_negative_ids, hard_negative_report = store.choose_hard_negatives(queries, settings.hard_negative_count)
+            hard_negative_by_doc: dict[str, set[str]] = {}
+            target_queries_by_doc: dict[str, set[str]] = {}
+            for query in queries:
+                query_id = query["query_id"]
+                ids = hard_negative_ids[query_id]
+                query["hard_negative_doc_ids"] = sorted(ids)
+                query["related_doc_ids"] = sorted(set(query["evidence_doc_ids"]) | set(ids))
+                for doc_id in query["evidence_doc_ids"]:
+                    target_queries_by_doc.setdefault(doc_id, set()).add(query_id)
+                for doc_id in ids:
+                    hard_negative_by_doc.setdefault(doc_id, set()).add(query_id)
+                    target_queries_by_doc.setdefault(doc_id, set()).add(query_id)
             mandatory = {identifier for query in queries for identifier in query["context_doc_ids"]}
+            mandatory.update(hard_negative_by_doc)
             documents = store.choose_documents(mandatory, settings.document_count)
+            evidence_doc_ids = {doc_id for query in queries for doc_id in query["evidence_doc_ids"]}
+            for doc in documents:
+                doc_id = doc["doc_id"]
+                if doc_id in evidence_doc_ids:
+                    doc["document_role"] = "evidence"
+                elif doc_id in hard_negative_by_doc:
+                    doc["document_role"] = "hard_negative"
+                else:
+                    doc["document_role"] = "background"
+                doc["target_query_ids"] = sorted(target_queries_by_doc.get(doc_id, set()))
             counts["mandatory_context_documents"] = len(mandatory)
             counts["background_documents_added"] = len(documents) - len(mandatory)
             counts["title_conflict_groups"] = store.connection.execute("SELECT count(*) FROM (SELECT title FROM documents GROUP BY title HAVING count(*)>1)").fetchone()[0]
@@ -193,6 +371,7 @@ def prepare_dataset(
             "sampled_query_ids": sorted(query["query_id"] for query in queries),
             "counts": dict(sorted(counts.items())), "rejection_reasons": dict(sorted(rejected.items())),
             "sampling": sampling, "title_conflicts": conflicts, "statistics": _statistics(documents, queries, evidence),
+            "hard_negative": hard_negative_report,
             "validation": report,
             "limitations": ["Short answers only; a controlled-size development-set corpus, not a full-Wikipedia benchmark.", "NQ documents are full pages; HotpotQA documents are supplied paragraphs.", "NQ requires two agreeing single-span annotations; HotpotQA excludes yes/no answers."],
         }

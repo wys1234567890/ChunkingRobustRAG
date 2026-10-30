@@ -1,12 +1,13 @@
 # Explicit alternative when the original Google/CMU endpoints are inaccessible.
 # Publisher repositories and immutable revisions; only development data are used.
 seed: 42
-data_version: clean-hf-v1
+data_version: clean-hf-v3-hardneg
 schema_version: data-v1
 query_count: 100
 document_count: 2000
 audit_count: 20
 max_answer_words: 16
+hard_negative_count: 4
 processed_root: data/processed
 sources:
   nq:

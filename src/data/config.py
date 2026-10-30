@@ -26,6 +26,10 @@ class DataSettings:
     max_answer_words: int
     processed_root: str
     sources: dict[str, dict[str, Any]]
+    # When enabled, each selected query receives this many lexical hard
+    # negatives from the complete source-document pool.  Zero preserves the
+    # original Stage 1 corpus construction behaviour.
+    hard_negative_count: int = 0
     root: Path = REPOSITORY_ROOT
 
     def resolve(self, path: str) -> Path:
@@ -58,9 +62,9 @@ def load_data_settings(
         settings = DataSettings(**values, root=base)
     except TypeError as exc:
         raise DataError(f"invalid data configuration: {exc}") from exc
-    for field in ("seed", "query_count", "document_count", "audit_count", "max_answer_words"):
+    for field in ("seed", "query_count", "document_count", "audit_count", "max_answer_words", "hard_negative_count"):
         value = getattr(settings, field)
-        minimum = 0 if field == "seed" else 1
+        minimum = 0 if field in {"seed", "hard_negative_count"} else 1
         if type(value) is not int or value < minimum:
             raise DataError(f"{field} must be an integer >= {minimum}")
     if settings.audit_count > settings.query_count:

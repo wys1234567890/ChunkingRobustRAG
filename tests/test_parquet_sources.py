@@ -138,7 +138,7 @@ def test_429_is_retried_then_download_can_succeed(tmp_path):
 def test_mirror_config_pins_publisher_revisions_and_complete_development_splits():
     path = Path(__file__).resolve().parents[1] / "configs/data.huggingface.yaml"
     settings = load_data_settings(path)
-    assert settings.data_version == "clean-hf-v1"
+    assert settings.data_version == "clean-hf-v3-hardneg"
     assert len(settings.sources["nq"]["files"]) == 7
     assert len(settings.sources["hotpotqa"]["files"]) == 1
     for source in settings.sources.values():

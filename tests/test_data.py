@@ -13,9 +13,9 @@ import yaml
 
 from scripts.prepare_data import main
 from src.data import DataError, load_data_settings, load_documents, load_evidence, load_queries, prepare_dataset, validate_dataset, validate_records
-from src.data.adapters import adapt_hotpotqa, adapt_nq, clean_hotpot_sentences, clean_nq_tokens
-from src.data.common import file_sha256
-from src.data.pipeline import allocate_strata
+from src.data.adapters import _document, adapt_hotpotqa, adapt_nq, clean_hotpot_sentences, clean_nq_tokens
+from src.data.common import contains_answer, file_sha256
+from src.data.pipeline import _StagingStore, allocate_strata
 from src.data.sources import download_source
 from tests.data_factory import hotpot_record, nq_record
 
@@ -146,6 +146,51 @@ def test_hotpot_rejects_invalid_evidence_and_answers(settings, scenario, reason)
 def test_largest_remainder_allocations():
     assert allocate_strata({"bridge": 8, "comparison": 3}, 5) == {"bridge": 4, "comparison": 1}
     assert allocate_strata({"bridge": 1, "comparison": 1}, 1) == {"bridge": 1, "comparison": 0}
+
+
+@pytest.mark.parametrize("text,answers,expected", [
+    ("A Yorkshire museum.", ["York"], False),
+    ("A museum in YORK.", ["York"], True),
+    ("New York has a museum.", ["New York"], True),
+    ("New Yorkshire has a museum.", ["New York"], False),
+])
+def test_answer_leakage_matches_complete_token_phrases(text, answers, expected):
+    assert contains_answer(text, answers) is expected
+
+
+def test_hard_negative_validation_uses_same_answer_matcher(settings):
+    record = adapt_nq(nq_record(answer="York"), "nq.jsonl", settings)
+    negative = _document("nq", "Museum", "A Yorkshire museum.",
+                         {"raw_file": "nq.jsonl", "source_query_id": "other"}, settings)
+    record.query["hard_negative_doc_ids"] = [negative["doc_id"]]
+    record.query["related_doc_ids"] = sorted(record.query["evidence_doc_ids"] + [negative["doc_id"]])
+    validate_records(record.documents + [negative], [record.query], record.evidence)
+
+
+def test_hard_negative_selection_is_deterministic_and_excludes_answer(settings, tmp_path):
+    store = _StagingStore(tmp_path / "staging.sqlite")
+    docs = [
+        _document("nq", "Evidence", "Acme Institute was founded by Ada Lovelace.", {"raw_file": "x", "source_query_id": "q"}, settings),
+        _document("nq", "Museum", "Acme Institute opened a museum in London.", {"raw_file": "x", "source_query_id": "m"}, settings),
+        _document("nq", "Funding", "Acme Institute received funding from the council.", {"raw_file": "x", "source_query_id": "f"}, settings),
+        _document("nq", "AnswerLeak", "Acme Institute was founded by Ada Lovelace in 2001.", {"raw_file": "x", "source_query_id": "l"}, settings),
+    ]
+    for index, doc in enumerate(docs):
+        store.add_document(doc, f"{index:064d}")
+    query = {
+        "query_id": "nq-q", "question": "Who founded the Acme Institute?",
+        "ground_truth": ["Ada Lovelace"], "context_doc_ids": [docs[0]["doc_id"]],
+        "evidence_doc_ids": [docs[0]["doc_id"]],
+    }
+    selected, report = store.choose_hard_negatives([query], 2)
+    assert len(selected["nq-q"]) == 2
+    assert docs[2]["doc_id"] in selected["nq-q"] or docs[1]["doc_id"] in selected["nq-q"]
+    assert docs[3]["doc_id"] not in selected["nq-q"]
+    assert len(report["selections"]) == 2
+    assert all(item["query_id"] == "nq-q" and item["score"] > 0 for item in report["selections"])
+    selected_again, _ = store.choose_hard_negatives([query], 2)
+    assert selected_again == selected
+    store.connection.close()
 
 
 @pytest.mark.parametrize("dataset", ["nq", "hotpotqa"])
