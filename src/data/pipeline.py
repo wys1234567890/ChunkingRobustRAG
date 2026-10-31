@@ -323,24 +323,39 @@ def _load_e5_model(settings: DataSettings):
     return model
 
 
-def _encode_e5(model, texts: list[str]) -> list[list[float]]:
+def _encode_e5(model, texts: list[str]) -> object:
     if not texts:
         return []
     values = model.encode(
         texts, batch_size=32, show_progress_bar=False,
         convert_to_numpy=True, normalize_embeddings=True,
     )
-    return values.tolist()
+    return values
 
 
-def encode_e5_candidates(model, question: str, evidence_text: str, candidates: list[dict]) -> list[dict]:
+class _E5EmbeddingCache:
+    """Reuse passage/query vectors across questions during corpus-wide filtering."""
+
+    def __init__(self, model):
+        self.model = model
+        self.vectors: dict[str, object] = {}
+
+    def encode(self, texts: list[str]) -> list[object]:
+        missing = list(dict.fromkeys(text for text in texts if text not in self.vectors))
+        if missing:
+            vectors = _encode_e5(self.model, missing)
+            self.vectors.update(zip(missing, vectors))
+        return [self.vectors[text] for text in texts]
+
+
+def encode_e5_candidates(model, question: str, evidence_text: str, candidates: list[dict], cache: _E5EmbeddingCache | None = None) -> list[dict]:
     """Attach query/evidence cosine scores to BM25-ranked candidates."""
     representations = [
         f"query: {question}",
         f"passage: {_truncate_tokens(evidence_text)}",
         *(f"passage: {item['doc']['title']} {_truncate_tokens(item['doc']['text'])}" for item in candidates),
     ]
-    vectors = _encode_e5(model, representations)
+    vectors = (cache or _E5EmbeddingCache(model)).encode(representations)
     query_vector, evidence_vector = vectors[:2]
     return [
         {
@@ -385,15 +400,21 @@ def _dot(left: list[float], right: list[float]) -> float:
 
 
 def _near_duplicate(text: str, evidence_texts: list[str]) -> bool:
-    candidate = " ".join(_tokens(text))
+    candidate = normalize_inline(text)
     if not candidate:
         return True
     for evidence in evidence_texts:
-        reference = " ".join(_tokens(evidence))
+        reference = normalize_inline(evidence)
         if candidate == reference:
             return True
-        if min(len(candidate), len(reference)) >= 40 and SequenceMatcher(None, candidate, reference).ratio() >= 0.95:
-            return True
+        # SequenceMatcher is quadratic. Compare only bounded token windows
+        # after the cheap full-text equality check so long NQ pages cannot
+        # dominate candidate filtering.
+        if min(len(candidate), len(reference)) >= 40:
+            candidate_window = _truncate_tokens(candidate, 512)
+            reference_window = _truncate_tokens(reference, 512)
+            if SequenceMatcher(None, candidate_window, reference_window).ratio() >= 0.95:
+                return True
     return False
 
 
@@ -480,8 +501,14 @@ class _StagingStore:
     def all_queries(self) -> list[dict]:
         return [json.loads(payload) for payload, in self.connection.execute("SELECT payload FROM queries ORDER BY rank,id")]
 
-    def choose_strict_queries(self, settings: DataSettings, model) -> tuple[list[dict], dict, dict]:
+    def choose_strict_queries(
+        self, settings: DataSettings, model,
+        progress: Callable[[str], None] = lambda message: None,
+    ) -> tuple[list[dict], dict, dict]:
         all_rows = self.all_queries()
+        dataset_name = all_rows[0]["query"]["dataset"] if all_rows else "dataset"
+        total_queries = len(all_rows)
+        progress(f"{dataset_name}: strict hard-negative filtering started ({total_queries} candidate queries)")
         all_documents = self.all_documents(compact=True)
         pool = build_candidate_pool(all_documents, set())
         index = build_bm25_index(pool, [row["query"]["question"] for row in all_rows])
@@ -489,7 +516,12 @@ class _StagingStore:
         rejected = Counter()
         candidate_audit = []
         query_rejections = []
-        for row in all_rows:
+        e5_cache = _E5EmbeddingCache(model)
+        def report_progress(index: int) -> None:
+            if index % 10 == 0 or index == total_queries:
+                progress(f"{dataset_name}: strict filtering {index}/{total_queries}; qualified={sum(map(len, eligible.values()))}; rejected={sum(rejected.values())}; cached_e5={len(e5_cache.vectors)}")
+
+        for query_index, row in enumerate(all_rows, 1):
             query = row["query"]
             question_id = query["query_id"]
             evidence_ids = set(query["evidence_doc_ids"])
@@ -499,6 +531,7 @@ class _StagingStore:
             if not anchors:
                 rejected["low_anchor_overlap"] += 1
                 query_rejections.append({"query_id": question_id, "reason": "low_anchor_overlap"})
+                report_progress(query_index)
                 continue
             evidence_items = row["evidence"]
             evidence_text = build_evidence_representation(query, evidence_items, evidence_docs)
@@ -547,8 +580,9 @@ class _StagingStore:
                     "query_id": question_id, "reason": reason,
                     "qualified_before_e5": len(candidates), "required": settings.hard_negative_count,
                 })
+                report_progress(query_index)
                 continue
-            encoded = encode_e5_candidates(model, query["question"], evidence_text, candidates)
+            encoded = encode_e5_candidates(model, query["question"], evidence_text, candidates, e5_cache)
             maximum_bm25 = max(item["bm25_score"] for item in candidates)
             qualified = []
             for item in encoded:
@@ -585,12 +619,15 @@ class _StagingStore:
                     "query_id": question_id, "reason": "low_e5_similarity",
                     "qualified_after_e5": len(qualified), "required": settings.hard_negative_count,
                 })
+                report_progress(query_index)
                 continue
             if not validate_active_competition(chosen, settings.hard_negative_active_top_k, settings.hard_negative_min_active):
                 rejected["inactive_retrieval_competition"] += 1
                 query_rejections.append({"query_id": question_id, "reason": "inactive_retrieval_competition"})
+                report_progress(query_index)
                 continue
             eligible[row["query"]["question_type"]].append({**row, "audit": qualified})
+            report_progress(query_index)
         counts = {key: len(value) for key, value in eligible.items()}
         if sum(counts.values()) < settings.query_count:
             raise DataError(f"insufficient qualified queries: need {settings.query_count}, found {sum(counts.values())}; rejection reasons: {dict(rejected)}")
@@ -774,7 +811,7 @@ def prepare_dataset(
                 raise DataError(f"{dataset}: incomplete source split: expected {expected} records, found {counts['raw_records']}")
             counts["duplicate_questions"] = store.deduplicate_questions()
             if strict:
-                selected, sampling, hard_negative_report = store.choose_strict_queries(settings, model)
+                selected, sampling, hard_negative_report = store.choose_strict_queries(settings, model, progress=progress)
             else:
                 selected, sampling = store.choose_queries(settings)
                 hard_negative_report = None
