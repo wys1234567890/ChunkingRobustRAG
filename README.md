@@ -237,7 +237,7 @@ python -m scripts.retrieve --chunks data/processed/chunks/nq/fixed-cs512-ov00.js
 ```
 
 - BM25：`rank-bm25` Okapi，Unicode 词级切分，按分数降序、`chunk_id` 升序稳定打破平局。
-- E5：`sentence-transformers` 加载 `intfloat/multilingual-e5-small`，query 加 `query: `、chunk 加 `passage: ` 前缀，归一化后做余弦相似度。该模型最大输入为 512 token；`chunk_size` 为 1024/2048 时 embedding 会被截断，实验记录中必须注明，或改用支持长上下文的 embedding 模型。离线环境可把完整模型目录放到 `models/intfloat-multilingual-e5-small/`，`scripts/retrieve.py` 用 `--model-name models/intfloat-multilingual-e5-small`，`scripts/run_experiment.py` 用环境变量 `E5_MODEL_NAME=models/intfloat-multilingual-e5-small`，并配合 `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1`。
+- E5：`sentence-transformers` 加载 `intfloat/multilingual-e5-small`，query 加 `query: `、chunk 加 `passage: ` 前缀，归一化后做余弦相似度。该模型最大输入为 512 token；`chunk_size` 为 1024/2048 时 embedding 会被截断，实验记录中必须注明，或改用支持长上下文的 embedding 模型。离线环境可把完整模型目录放到 `models/intfloat-multilingual-e5-small/`，`scripts/retrieve.py` 用 `--model-name models/intfloat-multilingual-e5-small`，并配合 `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1`。
 - 每条结果包含 `score`、`rank`、`retriever`、`retriever_version`，并保留完整 chunk 字段；版本串记录包版本和 BM25 参数或 E5 模型名。
 
 ### 验收
