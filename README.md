@@ -1,6 +1,6 @@
 # ChunkingRobustRAG
 
-仓库包含阶段 0 的 API/环境契约、阶段 1 的数据准备与证据对齐，以及阶段 3 的分块与检索模块。研究主线使用 OpenAI-compatible Chat Completions 接口生成答案和执行 judge；embedding 保持本地 E5，避免同时改变多个实验变量。
+仓库包含阶段 0 的 API/环境契约、阶段 1 的数据准备与证据对齐、阶段 2 的隐式事实污染数据集，以及阶段 3 的分块与检索模块。研究主线使用 OpenAI-compatible Chat Completions 接口生成答案和执行 judge；embedding 保持本地 E5，避免同时改变多个实验变量。阶段 4 及以后依赖真实 LLM API，不在本分支实现。
 
 ## 环境
 
@@ -147,6 +147,23 @@ report = validate_dataset(directory)
 
 验收统计使用字符数和空白分词数，不提前固定阶段 3 tokenizer。实验结论限于短答案、受控规模开发集语料库；NQ 文档是页面、HotpotQA 文档是段落，两者长度分布在各自 manifest 中单独报告。原始数据、生成产物和审核记录被 Git 忽略，合成测试样本随代码保存。
 
+## 阶段 2：隐式事实污染数据集
+
+本阶段读取阶段 1 的冻结干净库，按目标 query 注入**隐式事实污染**：把真实答案替换为一个结构相同但错误的陈述，写成普通说明句，不含“忽略上文”“请回答”等显式指令。完整规格见 `stage2.md`，配置固定在 `configs/corruption.yaml`。
+
+```powershell
+python -m scripts.build_corruption --dataset all
+python -m scripts.build_corruption --dataset all --validate-only
+```
+
+- 比例固定为 `0/5/10/20%`，分母是最终知识库文档数 `D`（含污染文档），污染条数 `P = round_half_up(r * D / (1 - r))`，因此 `P / (D + P) = r`。干净库有 2,000 篇文档时，三档污染分别为 105、222、500 条。
+- 每个选中 query 至少保留一个专属污染文档；`P >= Q` 是硬性前提，否则直接失败，不能降低 query 覆盖率。污染文档按稳定哈希在 query 间均衡分配。
+- 输出目录为 `data/poisoned/fact-v1-entity-append/<dataset>/ratio-0p00|0p05|0p10|0p20/`，每个目录包含 `documents.jsonl`、`queries.jsonl`、`evidence.jsonl`、`poison_records.jsonl`、`audit_samples.jsonl` 和 `manifest.json`。
+- `poison_records.jsonl` 逐条记录真实事实、错误事实、来源文档、来源证据、替换次数、构造方式、审核状态和文本哈希，可完整回溯；`queries.jsonl` 增加 `poison_doc_ids`、`poison_ratio_target`、`poison_ratio_actual` 和 `poison_version`。
+- 生成过程先写 staging 目录，再用独立的 `validate_poison_dataset` 校验 ID、哈希、真实事实是否彻底消失、错误事实是否出现、显式指令 blocklist、query 覆盖率、比例和均衡分配；全部通过后才原子重命名为正式目录，失败会删除 staging，不会留下半成品。
+- `status=validated` 只表示自动验收通过，`human_review_status=pending` 仍待人工抽查；发现问题时修改规则并提升 `poison_version` 重跑，不覆盖旧版本。
+- 程序行为可用合成样本验证：`python -m scripts.build_corruption --synthetic --dataset nq`，产物与真实研究数据隔离。
+
 ## 阶段 3：分块与检索
 
 本阶段读取阶段 1/2 的 `documents.jsonl`，按文档生成 chunk JSONL；输入可以是干净库，也可以是带 `is_poison=true` 的事实污染库。分块只索引文档正文，不把问题、答案或证据标签拼进知识库。
@@ -220,7 +237,7 @@ python -m scripts.retrieve --chunks data/processed/chunks/nq/fixed-cs512-ov00.js
 ```
 
 - BM25：`rank-bm25` Okapi，Unicode 词级切分，按分数降序、`chunk_id` 升序稳定打破平局。
-- E5：`sentence-transformers` 加载 `intfloat/multilingual-e5-small`，query 加 `query: `、chunk 加 `passage: ` 前缀，归一化后做余弦相似度。该模型最大输入为 512 token；`chunk_size` 为 1024/2048 时 embedding 会被截断，实验记录中必须注明，或改用支持长上下文的 embedding 模型。
+- E5：`sentence-transformers` 加载 `intfloat/multilingual-e5-small`，query 加 `query: `、chunk 加 `passage: ` 前缀，归一化后做余弦相似度。该模型最大输入为 512 token；`chunk_size` 为 1024/2048 时 embedding 会被截断，实验记录中必须注明，或改用支持长上下文的 embedding 模型。离线环境可把完整模型目录放到 `models/intfloat-multilingual-e5-small/`，`scripts/retrieve.py` 用 `--model-name models/intfloat-multilingual-e5-small`，`scripts/run_experiment.py` 用环境变量 `E5_MODEL_NAME=models/intfloat-multilingual-e5-small`，并配合 `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1`。
 - 每条结果包含 `score`、`rank`、`retriever`、`retriever_version`，并保留完整 chunk 字段；版本串记录包版本和 BM25 参数或 E5 模型名。
 
 ### 验收
@@ -230,4 +247,8 @@ python -m pytest tests/test_chunking.py tests/test_retrieval.py
 ```
 
 测试覆盖三种策略的 span 回读、重叠、句子边界、层级边界与父级路径、无标题文档的层级退化、污染标记、重复 ID、非法参数，以及 BM25/E5 的 Top-5 返回与稳定排序。真实 E5 首次运行会下载模型；没有本地模型时先完成 BM25 和注入式假模型测试，不要因此跳过接口验收。
+
+## 阶段 2 与阶段 3 的边界
+
+阶段 4 起需要真实 LLM API（生成答案和可选的 LLM-as-judge），本分支只实现到阶段 3。阶段 2 的污染数据、阶段 3 的分块与本地 BM25/E5 检索都不依赖外部 API，可以离线复现。
 

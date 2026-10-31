@@ -1,0 +1,16 @@
+clean_data_version: clean-hf-v4-hardneg
+clean_processed_root: data/processed
+poisoned_root: data/poisoned
+poison_version: fact-v1-entity-append
+operator: entity_substitution
+operator_version: entity-substitution-v1
+template_version: neutral-fact-v1
+seed: 42
+ratios: [0.0, 0.05, 0.10, 0.20]
+ratio_denominator: final_corpus_documents
+question_coverage_required: 1.0
+query_allocation: balanced_stable_hash
+max_source_chars: 4000
+max_poison_chars: 6000
+blocklist_version: explicit-instruction-v1
+review_status_on_generate: pending
