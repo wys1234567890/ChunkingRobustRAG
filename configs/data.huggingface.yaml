@@ -1,12 +1,20 @@
 # Explicit alternative when the original Google/CMU endpoints are inaccessible.
 # Publisher repositories and immutable revisions; only development data are used.
 seed: 42
-data_version: clean-hf-v1
-schema_version: data-v1
+data_version: clean-hf-v4-hardneg
+schema_version: data-v2
 query_count: 100
 document_count: 2000
 audit_count: 20
 max_answer_words: 16
+hard_negative_count: 4
+hard_negative_bm25_k: 50
+hard_negative_active_top_k: 20
+hard_negative_min_active: 2
+hard_negative_min_query_cosine: 0.55
+hard_negative_min_evidence_cosine: 0.60
+hard_negative_e5_model: intfloat/e5-base-v2
+hard_negative_e5_model_path: models/intfloat-e5-base-v2
 processed_root: data/processed
 sources:
   nq:

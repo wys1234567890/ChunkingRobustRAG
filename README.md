@@ -51,7 +51,15 @@ live 模式会输出两次调用的状态，并验证第二次相同请求命中
 
 ## 阶段 1：准备干净数据
 
-本阶段不需要 `.env`、API key、生成模型或 embedding 模型。默认配置固定 `seed=42`、`data_version=clean-v1`、`schema_version=data-v1`；NQ 和 HotpotQA 分别准备 100 条目标问题和 2,000 篇文档，两个知识库独立使用。
+本阶段不需要 `.env` 或 API key。默认研究配置固定 `seed=42`、`data_version=clean-v4-hardneg`、`schema_version=data-v2`；NQ 和 HotpotQA 分别准备 100 条目标问题和 2,000 篇干净文档，两个知识库独立使用。严格 hard-negative 筛选需要本地 `intfloat/e5-base-v2`，数据构建不会自动联网下载模型。
+
+先把完整的 E5 模型目录放到 `models/intfloat-e5-base-v2/`，目录内应包含 Sentence Transformers 的配置、tokenizer 和权重文件。配置中的 `hard_negative_e5_model_path` 是相对仓库根目录解析的；模型目录缺失或不能离线加载时，命令会直接失败。构建阶段会把模型文件的 SHA-256 汇总写入 manifest，模型变化必须使用新的 `data_version`。
+
+如果当前机器允许单独下载模型，可以先执行下面的准备命令，再使用 `--offline` 构建数据；数据构建本身不会下载模型：
+
+```powershell
+hf download intfloat/e5-base-v2 --local-dir models/intfloat/e5-base-v2
+```
 
 ```powershell
 python -m scripts.prepare_data --dataset all
@@ -72,7 +80,7 @@ python -m scripts.prepare_data --config configs/data.huggingface.yaml --dataset 
 
 该配置使用发布方命名空间下的 [NQ](https://huggingface.co/datasets/google-research-datasets/natural_questions) 和 [HotpotQA](https://huggingface.co/datasets/hotpotqa/hotpot_qa) Parquet 数据，固定完整 commit revision，仅下载 NQ `dev/validation` 的 7 个分片（约 1.34 GB）及 HotpotQA `distractor/validation` 的 1 个分片。NQ 保留 HTML、token/byte 范围和人工标注；HotpotQA 保留全部上下文和支持句。读取时还原为原始标注结构，再复用相同的清洗、筛选和证据对齐流程，并强制检查源记录数分别为 7,830 和 7,405。
 
-来源变化显式使用 `data_version=clean-hf-v1`，输出位于 `data/processed/clean-hf-v1/nq/` 和 `data/processed/clean-hf-v1/hotpotqa/`；配置、固定 revision、实际下载 URL 和文件哈希均写入 manifest。原 Google/CMU 配置保留，不会静默切换数据来源。已有本地 Parquet 文件可以放在该配置指定的路径，再加 `--offline` 处理。
+来源变化显式使用 `data_version=clean-hf-v4-hardneg`，输出位于 `data/processed/clean-hf-v4-hardneg/nq/` 和 `data/processed/clean-hf-v4-hardneg/hotpotqa/`；配置、固定 revision、实际下载 URL 和文件哈希均写入 manifest。原 Google/CMU 配置保留，不会静默切换数据来源。已有本地 Parquet 文件可以放在该配置指定的路径，再加 `--offline` 处理。
 
 403 等确定性的请求拒绝不重复重试；429 限流、408 超时和服务端错误仍按原规则重试。下载路径需要能够访问所选数据站点；离线测试通过不代表当前网络已能访问远程站点。
 
@@ -101,24 +109,26 @@ python -m scripts.prepare_data --config configs/data.smoke.yaml --dataset all --
 
 ### 产物和加载接口
 
-默认版本输出到 `data/processed/clean-v1/nq/` 和 `data/processed/clean-v1/hotpotqa/`，每个目录包含：
+严格版本输出到 `data/processed/clean-v4-hardneg/nq/` 和 `data/processed/clean-v4-hardneg/hotpotqa/`（Hugging Face 配置对应 `clean-hf-v4-hardneg`），每个目录包含：
 
 | 文件 | 主要字段与用途 |
 | --- | --- |
 | `documents.jsonl` | `doc_id`、`dataset`、`title`、`text`、`source_refs`、`text_sha256`，兼容规划中的干净文档 schema |
-| `queries.jsonl` | `query_id`、`source_query_id`、`question`、`ground_truth`、`evidence_doc_ids`、`context_doc_ids`、题型和版本 |
+| `queries.jsonl` | `query_id`、`source_query_id`、`question`、`ground_truth`、`evidence_doc_ids`、`context_doc_ids`、`hard_negative_doc_ids`、`related_doc_ids`、`hard_negative_quality`、题型和版本 |
 | `evidence.jsonl` | `evidence_id`、`query_id`、`doc_id`、`kind`、`start_char`、`end_char`、`text`、`source_ref` 和版本 |
 | `manifest.json` | 来源/输出哈希、完整配置、抽样 ID、代码哈希及 Git revision、清洗/排除计数、标题冲突、长度分布和自动验收结果 |
 | `audit_samples.jsonl` | 固定随机抽取的 20 条问题，附完整证据与来源，`review_status=pending`，供人工核查 |
 
-所有原始 ID 都以字符串保存。`ground_truth` 是非空字符串数组，多个元素只表示来自同一答案标注的等价写法，不是多个联合答案。干净文档的 `source_doc_id=doc_id`、`is_poison=false`、`poison_version=clean-v1`，污染字段为 null，`target_query_ids=[]`。
+所有原始 ID 都以字符串保存。`ground_truth` 是非空字符串数组，多个元素只表示来自同一答案标注的等价写法，不是多个联合答案。干净文档的 `source_doc_id=doc_id`、`is_poison=false`、`poison_version` 等于当前数据版本，污染字段为 null。证据文档、hard negative 和背景文档分别使用 `document_role=evidence|hard_negative|background`，`target_query_ids` 记录该文档服务的问题。
+
+严格 hard negative 的候选先在完整开发集上用标题和正文前 1,024 个 token 做 BM25 Top-50 初筛，再使用本地 E5 按 `0.4 × query_e5_cosine + 0.4 × evidence_e5_cosine + 0.2 × normalized_bm25` 排序。候选必须通过实体/主题锚点、问题类型、答案泄漏、证据近重复和 `query >= 0.55`、`evidence >= 0.60` 两个 E5 阈值，并且每题至少 2 篇进入 BM25 Top-20；不满足条件的问题会被淘汰并重新抽样，不能降低阈值或复制文档。manifest 的 `hard_negative.candidate_audit` 保存每个候选的排名、分数、筛选原因和最终状态。
 
 字符位置使用 Python Unicode 字符索引和左闭右开区间，必须满足 `document.text[start_char:end_char] == evidence.text`。NQ 额外保留原始 token/UTF-8 byte 跨度、annotation ID 和原始答案；HotpotQA 保留原始问题 ID、上下文位置、标题及零起始 `sentence_id`。这些位置不等同于后续 chunk tokenizer 的 token 位置。
 
 ```python
 from src.data import load_documents, load_queries, load_evidence, validate_dataset
 
-directory = "data/processed/clean-v1/nq"
+directory = "data/processed/clean-v4-hardneg/nq"
 documents = load_documents(f"{directory}/documents.jsonl")
 queries = load_queries(f"{directory}/queries.jsonl")
 evidence = load_evidence(f"{directory}/evidence.jsonl")

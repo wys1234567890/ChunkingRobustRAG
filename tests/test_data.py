@@ -13,9 +13,9 @@ import yaml
 
 from scripts.prepare_data import main
 from src.data import DataError, load_data_settings, load_documents, load_evidence, load_queries, prepare_dataset, validate_dataset, validate_records
-from src.data.adapters import adapt_hotpotqa, adapt_nq, clean_hotpot_sentences, clean_nq_tokens
-from src.data.common import file_sha256
-from src.data.pipeline import allocate_strata
+from src.data.adapters import _document, adapt_hotpotqa, adapt_nq, clean_hotpot_sentences, clean_nq_tokens
+from src.data.common import contains_answer, file_sha256
+from src.data.pipeline import _BM25Index, _StagingStore, _load_e5_model, allocate_strata, build_bm25_index, build_candidate_pool, rank_bm25_candidates, rank_retrieval_competition
 from src.data.sources import download_source
 from tests.data_factory import hotpot_record, nq_record
 
@@ -146,6 +146,179 @@ def test_hotpot_rejects_invalid_evidence_and_answers(settings, scenario, reason)
 def test_largest_remainder_allocations():
     assert allocate_strata({"bridge": 8, "comparison": 3}, 5) == {"bridge": 4, "comparison": 1}
     assert allocate_strata({"bridge": 1, "comparison": 1}, 1) == {"bridge": 1, "comparison": 0}
+
+
+@pytest.mark.parametrize("text,answers,expected", [
+    ("A Yorkshire museum.", ["York"], False),
+    ("A museum in YORK.", ["York"], True),
+    ("New York has a museum.", ["New York"], True),
+    ("New Yorkshire has a museum.", ["New York"], False),
+])
+def test_answer_leakage_matches_complete_token_phrases(text, answers, expected):
+    assert contains_answer(text, answers) is expected
+
+
+def test_hard_negative_validation_uses_same_answer_matcher(settings):
+    record = adapt_nq(nq_record(answer="York"), "nq.jsonl", settings)
+    negative = _document("nq", "Museum", "A Yorkshire museum.",
+                         {"raw_file": "nq.jsonl", "source_query_id": "other"}, settings)
+    record.query["hard_negative_doc_ids"] = [negative["doc_id"]]
+    record.query["related_doc_ids"] = sorted(record.query["evidence_doc_ids"] + [negative["doc_id"]])
+    validate_records(record.documents + [negative], [record.query], record.evidence)
+
+
+def test_hard_negative_selection_is_deterministic_and_excludes_answer(settings, tmp_path):
+    store = _StagingStore(tmp_path / "staging.sqlite")
+    docs = [
+        _document("nq", "Evidence", "Acme Institute was founded by Ada Lovelace.", {"raw_file": "x", "source_query_id": "q"}, settings),
+        _document("nq", "Museum", "Acme Institute opened a museum in London.", {"raw_file": "x", "source_query_id": "m"}, settings),
+        _document("nq", "Funding", "Acme Institute received funding from the council.", {"raw_file": "x", "source_query_id": "f"}, settings),
+        _document("nq", "AnswerLeak", "Acme Institute was founded by Ada Lovelace in 2001.", {"raw_file": "x", "source_query_id": "l"}, settings),
+    ]
+    for index, doc in enumerate(docs):
+        store.add_document(doc, f"{index:064d}")
+    query = {
+        "query_id": "nq-q", "question": "Who founded the Acme Institute?",
+        "ground_truth": ["Ada Lovelace"], "context_doc_ids": [docs[0]["doc_id"]],
+        "evidence_doc_ids": [docs[0]["doc_id"]],
+    }
+    selected, report = store.choose_hard_negatives([query], 2)
+    assert len(selected["nq-q"]) == 2
+    assert docs[2]["doc_id"] in selected["nq-q"] or docs[1]["doc_id"] in selected["nq-q"]
+    assert docs[3]["doc_id"] not in selected["nq-q"]
+    assert len(report["selections"]) == 2
+    assert all(item["query_id"] == "nq-q" and item["score"] > 0 for item in report["selections"])
+    selected_again, _ = store.choose_hard_negatives([query], 2)
+    assert selected_again == selected
+    store.connection.close()
+
+
+def test_strict_hard_negatives_require_anchor_type_e5_and_active_competition(settings, tmp_path, monkeypatch):
+    store = _StagingStore(tmp_path / "strict.sqlite")
+    record = adapt_nq(nq_record(answer="Ada"), "nq.jsonl", settings)
+    evidence = record.documents[0]
+    store.add_document(evidence, "0" * 64)
+    candidates = []
+    for index in range(4):
+        doc = _document(
+            "nq", f"Page 1 City Profile {index}",
+            f"Page 1 city profile {index}. This city page describes a location founded in 197{index}.",
+            {"raw_file": "nq.jsonl", "source_query_id": f"negative-{index}"}, settings,
+        )
+        candidates.append(doc)
+        store.add_document(doc, f"{index + 1:064d}")
+    store.add_query(record.query, record.evidence, "a" * 64)
+    configured = replace(
+        settings, query_count=1, hard_negative_count=4,
+        hard_negative_bm25_k=50, hard_negative_active_top_k=20,
+        hard_negative_min_active=2, hard_negative_min_query_cosine=0.55,
+        hard_negative_min_evidence_cosine=0.60,
+    )
+    vectors = [[1.0, 0.0] for _ in range(6)]
+    monkeypatch.setattr("src.data.pipeline._encode_e5", lambda model, texts: vectors[:len(texts)])
+    selected, sampling, report = store.choose_strict_queries(configured, object())
+    assert len(selected) == 1
+    assert len(selected[0]["query"]["hard_negative_doc_ids"]) == 4
+    assert selected[0]["query"]["hard_negative_quality"]["active_hard_negative_count"] == 4
+    assert all(item["query_e5_cosine"] == 1.0 and item["evidence_e5_cosine"] == 1.0 for item in report["selections"])
+    assert report["unique_hard_negative_documents"] == 4
+    store.connection.close()
+
+
+def test_strict_hard_negative_selection_fails_when_no_queries_qualify(settings, tmp_path, monkeypatch):
+    store = _StagingStore(tmp_path / "strict-low-score.sqlite")
+    record = adapt_nq(nq_record(answer="Ada"), "nq.jsonl", settings)
+    store.add_document(record.documents[0], "0" * 64)
+    candidate = _document(
+        "nq", "Page 1 City Profile", "Page 1 city profile describes a location.",
+        {"raw_file": "nq.jsonl", "source_query_id": "negative"}, settings,
+    )
+    store.add_document(candidate, "1" * 64)
+    store.add_query(record.query, record.evidence, "a" * 64)
+    configured = replace(settings, query_count=1, hard_negative_count=1)
+    monkeypatch.setattr("src.data.pipeline._encode_e5", lambda model, texts: [[1.0, 0.0], [1.0, 0.0], *([[0.0, 1.0]] * (len(texts) - 2))])
+    with pytest.raises(DataError, match="insufficient qualified queries"):
+        store.choose_strict_queries(configured, object())
+    store.connection.close()
+
+
+def test_strict_candidate_pool_and_bm25_order_are_stable(settings):
+    documents = [
+        _document("nq", "Zeta", "Acme city profile", {"raw_file": "x", "source_query_id": "z"}, settings),
+        _document("nq", "Alpha", "Acme city profile", {"raw_file": "x", "source_query_id": "a"}, settings),
+    ]
+    first = build_candidate_pool(documents, set())
+    second = build_candidate_pool(list(reversed(documents)), set())
+    assert [item["doc_id"] for item in first] == [item["doc_id"] for item in second]
+    first_ranked = rank_bm25_candidates(_BM25Index(["acme city profile".split()] * 2), "Acme city", first, 2)
+    second_ranked = rank_bm25_candidates(_BM25Index(["acme city profile".split()] * 2), "Acme city", second, 2)
+    assert [item["doc"]["doc_id"] for item in first_ranked] == [item["doc"]["doc_id"] for item in second_ranked]
+
+
+def test_strict_e5_model_path_is_required_and_local(settings):
+    configured = replace(
+        settings, schema_version="data-v2", hard_negative_count=1,
+        hard_negative_e5_model="intfloat/e5-base-v2", hard_negative_e5_model_path="missing-model",
+    )
+    with pytest.raises(DataError, match="does not exist"):
+        _load_e5_model(configured)
+
+
+@pytest.mark.parametrize("dataset", ["nq", "hotpotqa"])
+def test_strict_full_size_selection_keeps_100_queries_and_2000_documents(settings, tmp_path, monkeypatch, dataset):
+    store = _StagingStore(tmp_path / f"{dataset}-full-size.sqlite")
+    for index in range(100):
+        if dataset == "nq":
+            raw = nq_record(index + 1, answer=f"Answer {index}", title=f"Topic {index}")
+            raw["question_text"] = f"Which city is linked to topic {index}?"
+            adapted = adapt_nq(raw, "nq.jsonl", settings)
+        else:
+            raw = hotpot_record(index + 1, "bridge" if index % 2 == 0 else "comparison")
+            raw["answer"] = f"Destination {index}"
+            adapted = adapt_hotpotqa(raw, "hotpotqa.json", settings)
+        store.add_query(adapted.query, adapted.evidence, f"{index:064d}")
+        for document in adapted.documents:
+            store.add_document(document, f"{index:064d}")
+        anchor = f"Topic {index}" if dataset == "nq" else f"City {index + 1}"
+        person = index if dataset == "nq" else index + 1
+        for candidate_index in range(4):
+            negative = _document(
+                dataset, f"{anchor} Location Profile {candidate_index}",
+                f"Person {person} is linked to {anchor}, a city location profile with regional detail {candidate_index}.",
+                {"raw_file": "synthetic.json", "source_query_id": f"negative-{index}-{candidate_index}"}, settings,
+            )
+            store.add_document(negative, f"{1000 + index * 4 + candidate_index:064d}")
+    for index in range(1600):
+        background = _document(
+            dataset, f"Background {index}", f"Unrelated archival background document {index}.",
+            {"raw_file": "synthetic.json", "source_query_id": f"background-{index}"}, settings,
+        )
+        store.add_document(background, f"{5000 + index:064d}")
+    configured = replace(
+        settings, query_count=100, document_count=2000, hard_negative_count=4,
+        hard_negative_bm25_k=50, hard_negative_active_top_k=20, hard_negative_min_active=2,
+    )
+    monkeypatch.setattr(
+        "src.data.pipeline._encode_e5",
+        lambda model, texts: [[1.0, 0.0] for _ in texts],
+    )
+    selected, _, report = store.choose_strict_queries(configured, object())
+    assert len(selected) == 100
+    assert all(len(row["query"]["hard_negative_doc_ids"]) == 4 for row in selected)
+    query_records = [row["query"] for row in selected]
+    mandatory = {doc_id for query in query_records for doc_id in query["context_doc_ids"] + query["hard_negative_doc_ids"]}
+    documents = store.choose_documents(mandatory, 2000)
+    assert len(documents) == 2000
+    final_pool = build_candidate_pool(documents, set())
+    index = build_bm25_index(final_pool, [query["question"] for query in query_records])
+    for query in query_records:
+        result = rank_retrieval_competition(
+            index, query["question"], final_pool, set(query["evidence_doc_ids"]),
+            set(query["hard_negative_doc_ids"]), 20,
+        )
+        assert result["active_hard_negative_count"] >= 2
+    assert report["unique_hard_negative_documents"] == 400
+    store.connection.close()
 
 
 @pytest.mark.parametrize("dataset", ["nq", "hotpotqa"])

@@ -26,6 +26,17 @@ class DataSettings:
     max_answer_words: int
     processed_root: str
     sources: dict[str, dict[str, Any]]
+    # When enabled, each selected query receives this many lexical hard
+    # negatives from the complete source-document pool.  Zero preserves the
+    # original Stage 1 corpus construction behaviour.
+    hard_negative_count: int = 0
+    hard_negative_bm25_k: int = 50
+    hard_negative_active_top_k: int = 20
+    hard_negative_min_active: int = 2
+    hard_negative_min_query_cosine: float = 0.55
+    hard_negative_min_evidence_cosine: float = 0.60
+    hard_negative_e5_model: str | None = None
+    hard_negative_e5_model_path: str | None = None
     root: Path = REPOSITORY_ROOT
 
     def resolve(self, path: str) -> Path:
@@ -58,19 +69,36 @@ def load_data_settings(
         settings = DataSettings(**values, root=base)
     except TypeError as exc:
         raise DataError(f"invalid data configuration: {exc}") from exc
-    for field in ("seed", "query_count", "document_count", "audit_count", "max_answer_words"):
+    for field in (
+        "seed", "query_count", "document_count", "audit_count", "max_answer_words",
+        "hard_negative_count", "hard_negative_bm25_k", "hard_negative_active_top_k",
+        "hard_negative_min_active",
+    ):
         value = getattr(settings, field)
-        minimum = 0 if field == "seed" else 1
+        minimum = 0 if field in {"seed", "hard_negative_count"} else 1
         if type(value) is not int or value < minimum:
             raise DataError(f"{field} must be an integer >= {minimum}")
     if settings.audit_count > settings.query_count:
         raise DataError("audit_count must not exceed query_count")
+    for field in ("hard_negative_min_query_cosine", "hard_negative_min_evidence_cosine"):
+        value = getattr(settings, field)
+        if type(value) not in (int, float) or not 0.0 <= value <= 1.0:
+            raise DataError(f"{field} must be a number between 0 and 1")
+    if settings.hard_negative_active_top_k < settings.hard_negative_min_active:
+        raise DataError("hard_negative_active_top_k must be >= hard_negative_min_active")
+    if settings.hard_negative_count:
+        if not isinstance(settings.hard_negative_e5_model, str) or not settings.hard_negative_e5_model.strip():
+            raise DataError("hard_negative_e5_model is required when hard negatives are enabled")
+        if not isinstance(settings.hard_negative_e5_model_path, str) or not settings.hard_negative_e5_model_path.strip():
+            raise DataError("hard_negative_e5_model_path is required when hard negatives are enabled")
     for field in ("data_version", "schema_version"):
         value = getattr(settings, field)
         if not isinstance(value, str) or not value or not all(c.isascii() and (c.isalnum() or c in "-_.") for c in value) or value in {".", ".."}:
             raise DataError(f"{field} must be a safe version name")
-    if settings.schema_version != "data-v1":
-        raise DataError("only schema_version=data-v1 is supported")
+    if settings.schema_version not in {"data-v1", "data-v2"}:
+        raise DataError("schema_version must be data-v1 or data-v2")
+    if settings.schema_version == "data-v2" and settings.hard_negative_count == 0:
+        raise DataError("schema_version=data-v2 requires hard_negative_count > 0")
     if not isinstance(settings.processed_root, str) or not settings.processed_root.strip():
         raise DataError("processed_root must not be empty")
     if not isinstance(settings.sources, dict):

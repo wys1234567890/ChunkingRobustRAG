@@ -39,6 +39,21 @@ def answer_key(text: str) -> str:
     return normalize_inline(text).casefold()
 
 
+def contains_answer(text: str, answers: Iterable[str]) -> bool:
+    """Return whether any answer occurs as a complete normalized token phrase."""
+    tokens = re.findall(r"[\w]+", normalize_inline(text).casefold())
+    for answer in answers:
+        phrase = re.findall(r"[\w]+", normalize_inline(answer).casefold())
+        # Very short one-token answers are too ambiguous for reliable corpus
+        # exclusion (for example, "A"), so they do not count as leakage.
+        if not phrase or (len(phrase) == 1 and len(phrase[0]) < 3):
+            continue
+        width = len(phrase)
+        if any(tokens[index:index + width] == phrase for index in range(len(tokens) - width + 1)):
+            return True
+    return False
+
+
 def normalize_body(text: str) -> str:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = [normalize_inline(line) for line in text.split("\n")]
