@@ -240,6 +240,34 @@ python -m scripts.retrieve --chunks data/processed/chunks/nq/fixed-cs512-ov00.js
 - E5：`sentence-transformers` 加载 `intfloat/multilingual-e5-small`，query 加 `query: `、chunk 加 `passage: ` 前缀，归一化后做余弦相似度。该模型最大输入为 512 token；`chunk_size` 为 1024/2048 时 embedding 会被截断，实验记录中必须注明，或改用支持长上下文的 embedding 模型。离线环境可把完整模型目录放到 `models/intfloat-multilingual-e5-small/`，`scripts/retrieve.py` 用 `--model-name models/intfloat-multilingual-e5-small`，并配合 `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1`。
 - 每条结果包含 `score`、`rank`、`retriever`、`retriever_version`，并保留完整 chunk 字段；版本串记录包版本和 BM25 参数或 E5 模型名。
 
+### Intel GPU（Windows / XPU）
+
+在安装 Intel 显卡驱动和基础依赖后，使用官方 XPU 版 PyTorch：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-xpu.txt
+.\.venv\Scripts\python.exe -c "import torch; print(torch.__version__); print('XPU:', torch.xpu.is_available()); print(torch.xpu.get_device_name(0) if torch.xpu.is_available() else 'Check Intel graphics driver')"
+```
+
+`requirements-xpu.txt` 在 `requirements.lock` 之后安装，覆盖基础锁文件中的 CPU 版 torch；重新安装基础锁文件后需要再次安装 XPU 版。无需额外安装 IPEX、torchvision 或 torchaudio。
+
+阶段 3/4 的 E5 在未指定设备或 `--device auto` 时优先选择 CUDA，其次 XPU，再使用 Sentence Transformers 的其他设备检测。`--device xpu` 或 `--device xpu:0` 强制使用 Intel GPU，不可用时直接报错；`--device cpu` 强制 CPU。当前阶段 3 命令会在 stderr 显示模型加载设备及 chunk 编码起止信息。
+
+使用已经下载的英文 E5 模型运行 NQ 检索：
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.retrieve `
+  --chunks data/processed/chunks/clean-hf-v4-hardneg/nq/clean/fixed-cs512-ov00.jsonl `
+  --queries data/processed/clean-hf-v4-hardneg/nq/queries.jsonl `
+  --retriever e5 `
+  --model-name models/intfloat-e5-base-v2 `
+  --device xpu `
+  --top-k 5 `
+  --output results/stage3/nq-clean-fixed512-e5-xpu.jsonl
+```
+
+此适配保留模型原有精度、前缀和归一化方式；chunk 向量仍只缓存在进程内。Intel NPU 不属于 PyTorch XPU 后端。
+
 ### 验收
 
 ```powershell

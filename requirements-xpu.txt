@@ -1,0 +1,5 @@
+# Install AFTER requirements.lock. This overrides its CPU torch wheel.
+# Windows / Python 3.12; official Intel GPU build, no IPEX required.
+# python -m pip install -r requirements-xpu.txt
+--index-url https://download.pytorch.org/whl/xpu
+torch==2.15.0+xpu

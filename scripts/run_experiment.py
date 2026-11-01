@@ -51,7 +51,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--retriever", choices=("bm25", "e5"), required=True)
     parser.add_argument("--top-k", type=int, default=TOP_K)
     parser.add_argument("--model-name", default=DEFAULT_E5_MODEL, help="E5 model name or local path")
-    parser.add_argument("--device", default=None, help="optional E5 device, e.g. cpu or cuda")
+    parser.add_argument("--device", default=None, help="E5 device: auto (default), cpu, cuda, xpu or xpu:0")
     parser.add_argument("--output", required=True, type=Path, help="output JSONL (append mode)")
     parser.add_argument("--limit", type=int, default=0, help="process only first N queries (0 = all)")
     parser.add_argument("--config", help="YAML config path")

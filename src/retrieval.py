@@ -6,9 +6,11 @@ records carrying the source chunk, score, rank, retriever name, and version.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, Sequence
 
 import numpy as np
@@ -21,6 +23,35 @@ BM25_TOKENIZER = "unicode-words-v1"
 _E5_QUERY_PREFIX = "query: "
 _E5_PASSAGE_PREFIX = "passage: "
 _WORD = re.compile(r"\w+")
+_LOGGER = logging.getLogger(__name__)
+
+
+def _resolve_e5_device(device: str | None) -> str:
+    """Select an accelerator explicitly; older Sentence Transformers misses XPU."""
+    import torch
+
+    xpu = getattr(torch, "xpu", None)
+    if device is None or device == "auto":
+        if torch.cuda.is_available():
+            return "cuda"
+        if xpu is not None and xpu.is_available():
+            return "xpu"
+        from sentence_transformers.util import get_device_name
+
+        return get_device_name()
+    if device.split(":", 1)[0] == "xpu":
+        if xpu is None or not xpu.is_available():
+            raise RetrievalError(
+                "Intel XPU is unavailable. Install the Intel graphics driver and "
+                "XPU-enabled PyTorch (see requirements-xpu.txt), or use --device cpu."
+            )
+        try:
+            index = torch.device(device).index
+        except (RuntimeError, ValueError) as exc:
+            raise RetrievalError(f"Invalid XPU device: {device}") from exc
+        if index is not None and index >= xpu.device_count():
+            raise RetrievalError(f"XPU device index out of range: {device}")
+    return device
 
 
 class RetrievalError(ValueError):
@@ -173,7 +204,13 @@ class E5Retriever:
                 from sentence_transformers import SentenceTransformer
             except ImportError as exc:  # pragma: no cover - optional heavy dependency
                 raise RetrievalError("sentence-transformers is required for the E5 retriever") from exc
-            self._model = SentenceTransformer(self._model_name, device=self._device)
+            self._device = _resolve_e5_device(self._device)
+            _LOGGER.info("Loading E5 model %s on %s", self._model_name, self._device)
+            self._model = SentenceTransformer(
+                self._model_name,
+                device=self._device,
+                local_files_only=Path(self._model_name).is_dir(),
+            )
         return self._model
 
     def _encode(self, texts: Sequence[str]) -> np.ndarray:
@@ -194,7 +231,9 @@ class E5Retriever:
 
     def _ensure_vectors(self) -> np.ndarray:
         if self._vectors is None:
+            _LOGGER.info("Encoding %d chunks (batch size %d)", len(self._chunks), self._batch_size)
             self._vectors = self._encode([self._passage_prefix + chunk.text for chunk in self._chunks])
+            _LOGGER.info("Chunk encoding complete; vectors cached in memory")
         return self._vectors
 
     def search(self, query: str, top_k: int = TOP_K) -> list[RetrievalHit]:

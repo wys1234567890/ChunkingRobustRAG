@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 
 from src.chunking import load_chunks
@@ -19,9 +20,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--retriever", choices=("bm25", "e5", "both"), default="bm25")
     parser.add_argument("--top-k", type=int, default=TOP_K)
     parser.add_argument("--model-name", default=DEFAULT_E5_MODEL)
-    parser.add_argument("--device", default=None, help="optional E5 device, e.g. cpu or cuda")
+    parser.add_argument("--device", default=None, help="E5 device: auto (default), cpu, cuda, xpu or xpu:0")
     parser.add_argument("--output", default=None, type=Path, help="optional output JSONL; stdout by default")
     args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     if bool(args.query) == bool(args.queries):
         parser.error("provide exactly one of --query or --queries")

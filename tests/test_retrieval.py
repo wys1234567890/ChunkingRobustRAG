@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
 from src.chunking import WhitespaceTokenizer, chunk_document, chunk_documents
-from src.retrieval import BM25Retriever, E5Retriever, RetrievalError, build_retriever
+from src.retrieval import BM25Retriever, E5Retriever, RetrievalError, build_retriever, _resolve_e5_device
 
 DOCUMENTS = [
     {"doc_id": "d0", "dataset": "nq", "text": "alpha beta gamma.", "is_poison": False},
@@ -112,3 +115,48 @@ def test_hit_serializes_chunk_identity_and_score(chunks):
     assert value["is_poison"] == hit.chunk.is_poison
     assert value["retriever"] == "bm25"
     assert isinstance(value["score"], float)
+
+
+@pytest.mark.parametrize("device", [None, "auto", "xpu", "xpu:0"])
+def test_e5_selects_intel_gpu_without_cuda(monkeypatch, device):
+    torch = SimpleNamespace(
+        cuda=SimpleNamespace(is_available=lambda: False),
+        xpu=SimpleNamespace(is_available=lambda: True, device_count=lambda: 1),
+        device=lambda value: SimpleNamespace(index=0 if ":" in value else None),
+    )
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    assert _resolve_e5_device(device) == (device if device in ("xpu", "xpu:0") else "xpu")
+
+
+def test_e5_auto_preserves_cuda_preference(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(
+        cuda=SimpleNamespace(is_available=lambda: True),
+        xpu=SimpleNamespace(is_available=lambda: True),
+    ))
+    assert _resolve_e5_device(None) == "cuda"
+
+
+def test_e5_cpu_install_gives_actionable_xpu_error(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace())
+    with pytest.raises(RetrievalError, match="requirements-xpu.txt"):
+        _resolve_e5_device("xpu")
+    assert _resolve_e5_device("cpu") == "cpu"
+
+
+def test_e5_rejects_missing_xpu_index(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(
+        xpu=SimpleNamespace(is_available=lambda: True, device_count=lambda: 1),
+        device=lambda value: SimpleNamespace(index=2),
+    ))
+    with pytest.raises(RetrievalError, match="out of range"):
+        _resolve_e5_device("xpu:2")
+
+
+def test_e5_auto_cpu_fallback(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(
+        cuda=SimpleNamespace(is_available=lambda: False),
+    ))
+    monkeypatch.setitem(sys.modules, "sentence_transformers.util", SimpleNamespace(
+        get_device_name=lambda: "cpu",
+    ))
+    assert _resolve_e5_device("auto") == "cpu"
