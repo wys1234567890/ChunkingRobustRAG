@@ -1,6 +1,6 @@
 # ChunkingRobustRAG
 
-仓库包含阶段 0 的 API/环境契约、阶段 1 的数据准备与证据对齐、阶段 2 的隐式事实污染数据集，以及阶段 3 的分块与检索模块。研究主线使用 OpenAI-compatible Chat Completions 接口生成答案和执行 judge；embedding 保持本地 E5，避免同时改变多个实验变量。阶段 4 及以后依赖真实 LLM API，不在本分支实现。
+仓库包含阶段 0 的 API/环境契约、阶段 1 的数据准备与证据对齐、阶段 2 的隐式事实污染数据集、阶段 3 的分块与检索模块，以及阶段 4 的 API RAG 推理。研究主线使用 OpenAI-compatible Chat Completions 接口生成答案和执行 judge；embedding 保持本地 E5，避免同时改变多个实验变量。阶段 5（自动评估）及以后依赖批量 LLM 调用，在阶段 4 跑通后再实现。
 
 ## 环境
 
@@ -248,7 +248,68 @@ python -m pytest tests/test_chunking.py tests/test_retrieval.py
 
 测试覆盖三种策略的 span 回读、重叠、句子边界、层级边界与父级路径、无标题文档的层级退化、污染标记、重复 ID、非法参数，以及 BM25/E5 的 Top-5 返回与稳定排序。真实 E5 首次运行会下载模型；没有本地模型时先完成 BM25 和注入式假模型测试，不要因此跳过接口验收。
 
+## 阶段 4：API RAG 推理
+
+本阶段把阶段 3 的检索结果接入 LLM，生成每条 query 的最终答案。核心模块是 `src/rag.py`，脚本是 `scripts/run_experiment.py`。
+
+### RAG pipeline
+
+`RagPipeline` 串联三个步骤：
+
+1. **检索**：调用传入的 `Retriever`（BM25 或本地 E5）取 Top-k chunk。
+2. **上下文构造**：`build_context` 把命中的 chunk 按排名编号拼成 `[1] ... [2] ...` 文本块。
+3. **生成**：`build_messages` 组装 system prompt + user（含 context 和 question），交给 `ApiClient.generate`。
+
+system prompt 只要求模型基于给定上下文回答、证据不足时说不知道，不包含任何与投毒相关的指令；污染文档本身也不携带控制模型行为的文本。缓存键由 `ApiClient` 基于 messages + 模型 + 参数 + `prompt_version` + `config_version` 生成，因此相同的检索上下文会命中缓存，不同 chunk 配置互不干扰。
+
+### 结果 schema
+
+每条结果写入一行 JSONL，字段对应规划 10.2 并补充阶段 4 可计算的信息：
+
+| 字段 | 说明 |
+| --- | --- |
+| `query_id` / `dataset` / `question` | 问题身份 |
+| `chunk_type` / `chunk_size` / `overlap` | 分块配置（从 chunk 文件首条推断） |
+| `retriever` / `retriever_version` / `top_k` | 检索配置 |
+| `poison_ratio` / `poison_version` | 污染元数据 |
+| `retrieved_poison` | Top-k 中是否存在 `is_poison=true` 的 chunk |
+| `retrieved_chunk_ids` / `poison_chunk_ids` | 召回的 chunk ID 列表 |
+| `ground_truth` / `false_facts` | 真实答案和该 query 对应的错误事实（来自 `poison_records.jsonl`） |
+| `model_output` | 模型生成文本；失败时为空字符串 |
+| `api_status` / `error_code` / `cache_hit` / `retry_count` | API 调用状态 |
+| `api_model` / `prompt_version` / `config_version` | 版本溯源 |
+| `latency_ms` / `input_tokens` / `output_tokens` / `estimated_cost` / `request_id` | 工程指标 |
+
+`judge_label`、`clean_correct` 等评估字段留到阶段 5 填充。
+
+### 运行实验
+
+```powershell
+python -m scripts.run_experiment `
+  --chunks data/processed/chunks/fact-v1/nq/ratio-0p05/fixed-cs512-ov00.jsonl `
+  --queries data/poisoned/fact-v1-entity-append/nq/ratio-0p05/queries.jsonl `
+  --poison-records data/poisoned/fact-v1-entity-append/nq/ratio-0p05/poison_records.jsonl `
+  --retriever bm25 `
+  --top-k 5 `
+  --output results/stage4/nq-0p05-fixed-bm25.jsonl `
+  --poison-ratio 0.05 `
+  --dataset nq
+```
+
+- `--limit N` 只处理前 N 条 query，用于 smoke test。
+- `--poison-records` 可选；提供后会把 `target_query_id` 对应的 `false_fact.value` 挂到结果的 `false_facts` 字段。
+- 输出以**追加模式**写入，已存在的 `query_id` 会被跳过，因此中断后重跑可续跑，不会重复调用 API。
+- API key 从 `.env` 或环境变量读取，不写入结果或日志。
+
+### 验收
+
+```powershell
+python -m pytest tests/test_rag.py
+```
+
+测试覆盖上下文编号、Top-k 截断、prompt 结构、`retrieved_poison` 判定、`ground_truth`/`false_facts` 透传、API 错误透传（`api_status=error`、`error_code` 保留）、空 `query_id` 拒绝，以及缓存命中时不重复调用 API。
+
 ## 阶段 2 与阶段 3 的边界
 
-阶段 4 起需要真实 LLM API（生成答案和可选的 LLM-as-judge），本分支只实现到阶段 3。阶段 2 的污染数据、阶段 3 的分块与本地 BM25/E5 检索都不依赖外部 API，可以离线复现。
+阶段 4 的 RAG 推理依赖真实 LLM API，但阶段 2 的污染数据、阶段 3 的分块与本地 BM25/E5 检索都不依赖外部 API，可以离线复现。阶段 5（规则评估 + LLM-as-judge）和阶段 6（统计与可视化）在阶段 4 结果稳定后实现。
 

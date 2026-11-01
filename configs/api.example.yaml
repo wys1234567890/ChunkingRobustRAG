@@ -11,7 +11,7 @@ runtime:
   concurrency: 4
   cache_dir: results/cache
 metadata:
-  config_version: stage0-v1
+  config_version: stage4-v1
   prompt_version: rag-v1
 pricing:
   input_per_1k: null
