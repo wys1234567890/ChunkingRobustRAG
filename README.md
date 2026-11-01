@@ -156,11 +156,11 @@ python -m scripts.build_corruption --dataset all
 python -m scripts.build_corruption --dataset all --validate-only
 ```
 
-- 比例固定为 `0/5/10/20%`，分母是最终知识库文档数 `D`（含污染文档），污染条数 `P = round_half_up(r * D / (1 - r))`，因此 `P / (D + P) = r`。干净库有 2,000 篇文档时，三档污染分别为 105、222、500 条。
-- 每个选中 query 至少保留一个专属污染文档；`P >= Q` 是硬性前提，否则直接失败，不能降低 query 覆盖率。污染文档按稳定哈希在 query 间均衡分配。
-- 输出目录为 `data/poisoned/fact-v1-entity-append/<dataset>/ratio-0p00|0p05|0p10|0p20/`，每个目录包含 `documents.jsonl`、`queries.jsonl`、`evidence.jsonl`、`poison_records.jsonl`、`audit_samples.jsonl` 和 `manifest.json`。
-- `poison_records.jsonl` 逐条记录真实事实、错误事实、来源文档、来源证据、替换次数、构造方式、审核状态和文本哈希，可完整回溯；`queries.jsonl` 增加 `poison_doc_ids`、`poison_ratio_target`、`poison_ratio_actual` 和 `poison_version`。
-- 生成过程先写 staging 目录，再用独立的 `validate_poison_dataset` 校验 ID、哈希、真实事实是否彻底消失、错误事实是否出现、显式指令 blocklist、query 覆盖率、比例和均衡分配；全部通过后才原子重命名为正式目录，失败会删除 staging，不会留下半成品。
+- 污染等级固定为 `0/5/10/20%`，主线按 query 级预算控制：每个 query 分别绑定 `0/1/2/4` 篇专属污染文档。两个数据集各有 100 条 query 时，四个档位的污染文档数分别为 0、100、200、400 条。
+- `query_allocation=fixed_per_query` 要求每个 query 的污染文档数量严格相同；`poison_docs_per_query` 写入配置、query 记录和 manifest。每条污染文档只服务一个 query，不能通过共享文档或不均匀分配改变攻击剂量。
+- 输出目录为 `data/poisoned/fact-v2-entity-append-query-budget/<dataset>/ratio-0p00|0p05|0p10|0p20/`，每个目录包含 `documents.jsonl`、`queries.jsonl`、`evidence.jsonl`、`poison_records.jsonl`、`audit_samples.jsonl` 和 `manifest.json`。
+- `poison_records.jsonl` 逐条记录真实事实、错误事实、来源文档、来源证据、替换次数、构造方式、审核状态和文本哈希，可完整回溯；`queries.jsonl` 增加 `poison_doc_ids`、`poison_docs_per_query`、`poison_ratio_target`、`poison_ratio_actual`、`poison_ratio_clean` 和 `poison_version`。
+- 生成过程先写 staging 目录，再用独立的 `validate_poison_dataset` 校验 ID、哈希、真实事实是否彻底消失、错误事实是否出现、显式指令 blocklist、query 覆盖率和固定 query 预算；全部通过后才原子重命名为正式目录，失败会删除 staging，不会留下半成品。
 - `status=validated` 只表示自动验收通过，`human_review_status=pending` 仍待人工抽查；发现问题时修改规则并提升 `poison_version` 重跑，不覆盖旧版本。
 - 程序行为可用合成样本验证：`python -m scripts.build_corruption --synthetic --dataset nq`，产物与真实研究数据隔离。
 
@@ -287,8 +287,8 @@ system prompt 只要求模型基于给定上下文回答、证据不足时说不
 ```powershell
 python -m scripts.run_experiment `
   --chunks data/processed/chunks/fact-v1/nq/ratio-0p05/fixed-cs512-ov00.jsonl `
-  --queries data/poisoned/fact-v1-entity-append/nq/ratio-0p05/queries.jsonl `
-  --poison-records data/poisoned/fact-v1-entity-append/nq/ratio-0p05/poison_records.jsonl `
+  --queries data/poisoned/fact-v2-entity-append-query-budget/nq/ratio-0p05/queries.jsonl `
+  --poison-records data/poisoned/fact-v2-entity-append-query-budget/nq/ratio-0p05/poison_records.jsonl `
   --retriever bm25 `
   --top-k 5 `
   --output results/stage4/nq-0p05-fixed-bm25.jsonl `

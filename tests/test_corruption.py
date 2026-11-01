@@ -44,12 +44,12 @@ def _document(doc_id: str, title: str, text: str, role: str, targets: list[str],
     }
 
 
-def _clean_fixture(root: Path, *, reverse: bool = False) -> Path:
+def _clean_fixture(root: Path, *, reverse: bool = False, query_count: int = 4) -> Path:
     root.mkdir(parents=True)
     documents = []
     queries = []
     evidence = []
-    for index in range(4):
+    for index in range(query_count):
         title = f"Topic {index}"
         fact = f"Value-{index}"
         body = f"The verified answer is {fact} for item {index}."
@@ -165,9 +165,17 @@ def _settings(tmp_path: Path, ratios: tuple[float, ...]):
                 "template_version: neutral-fact-v1",
                 "seed: 42",
                 f"ratios: [{', '.join(str(value) for value in ratios)}]",
-                "ratio_denominator: final_corpus_documents",
+                "ratio_denominator: clean_documents",
                 "question_coverage_required: 1.0",
-                "query_allocation: balanced_stable_hash",
+                "query_allocation: fixed_per_query",
+                "poison_docs_per_query:",
+                '  "0.0": 0',
+                '  "0.05": 1',
+                '  "0.10": 2',
+                '  "0.20": 4',
+                '  "0.25": 1',
+                '  "0.50": 2',
+                '  "0.90": 10',
                 "max_source_chars: 4000",
                 "max_poison_chars: 6000",
                 "blocklist_version: explicit-instruction-v1",
@@ -181,8 +189,8 @@ def _settings(tmp_path: Path, ratios: tuple[float, ...]):
 
 
 def test_poison_count_uses_final_corpus_denominator():
-    assert [poison_count(2000, ratio) for ratio in (0.0, 0.05, 0.10, 0.20)] == [0, 105, 222, 500]
-    assert poison_count(2000, 0.05, "clean_documents") == 100
+    assert [poison_count(2000, ratio) for ratio in (0.0, 0.05, 0.10, 0.20)] == [0, 100, 200, 400]
+    assert poison_count(2000, 0.05, "final_corpus_documents") == 105
 
 
 def test_invalid_ratios_and_denominators_are_rejected(tmp_path):
@@ -257,7 +265,9 @@ def test_build_and_validate_ratio(tmp_path, ratio):
     report = build_poison_dataset(clean, output, settings, ratio=ratio, dataset=DATASET)
     assert report["status"] == "validated"
     assert report["poison_question_coverage"] == (None if ratio == 0 else 1.0)
-    assert report["poison_document_count"] == poison_count(12, ratio)
+    expected_per_query = {0.0: 0, 0.25: 1, 0.5: 2}[ratio]
+    assert report["poison_document_count"] == 4 * expected_per_query
+    assert report["poison_docs_per_query"] == expected_per_query
     queries = [json.loads(line) for line in (output / "queries.jsonl").read_text().splitlines()]
     covered = [query for query in queries if query["poison_doc_ids"]]
     if ratio:
@@ -265,6 +275,17 @@ def test_build_and_validate_ratio(tmp_path, ratio):
     else:
         assert not covered
     validate_poison_dataset(output, expected_clean_manifest=json.loads((clean / "manifest.json").read_text()))
+
+
+def test_fixed_query_budget_is_exact_and_uniform(tmp_path):
+    clean = _clean_fixture(tmp_path / "clean", query_count=5)
+    settings = _settings(tmp_path, (0.20,))
+    output = tmp_path / "out"
+    report = build_poison_dataset(clean, output, settings, ratio=0.20, dataset=DATASET)
+    assert report["poison_document_count"] == 20
+    queries = [json.loads(line) for line in (output / "queries.jsonl").read_text().splitlines()]
+    assert {len(query["poison_doc_ids"]) for query in queries} == {4}
+    assert {query["poison_docs_per_query"] for query in queries} == {4}
 
 
 def test_input_row_order_does_not_change_output(tmp_path):

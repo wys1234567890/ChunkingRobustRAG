@@ -42,15 +42,22 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _settings(args: argparse.Namespace) -> PoisonSettings:
-    settings = load_poison_settings(args.config, ratios=args.ratio)
+    # Synthetic smoke runs may request an ad-hoc ratio; assign one poison
+    # document per query for that level after loading the canonical config.
+    settings = load_poison_settings(args.config, ratios=None if args.synthetic else args.ratio)
     if args.synthetic:
+        synthetic_ratios = args.ratio or (0.0, 0.05)
+        synthetic_budgets = dict(settings.poison_docs_per_query)
+        for ratio in synthetic_ratios:
+            synthetic_budgets.setdefault(f"{float(ratio):.8f}", 0 if float(ratio) == 0 else 1)
         settings = replace(
             settings,
             clean_data_version="synthetic-smoke-v2",
             clean_processed_root="data/processed",
             poisoned_root="data/synthetic/poisoned",
             poison_version=f"{settings.poison_version}-synthetic",
-            ratios=args.ratio or (0.0, 0.25),
+            ratios=synthetic_ratios,
+            poison_docs_per_query=synthetic_budgets,
         )
     elif args.clean_dir:
         manifest = json.loads((Path(args.clean_dir) / "manifest.json").read_text(encoding="utf-8"))

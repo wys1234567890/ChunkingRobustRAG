@@ -11,7 +11,7 @@ from ..data.common import DataError, rank
 def poison_count(
     clean_document_count: int,
     ratio: float,
-    denominator: str = "final_corpus_documents",
+    denominator: str = "clean_documents",
 ) -> int:
     """Return the poison document count for one target ratio.
 
@@ -32,6 +32,25 @@ def poison_count(
     else:
         raise DataError(f"unknown ratio denominator: {denominator!r}")
     return int(raw.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def fixed_poison_count(query_count: int, poison_docs_per_query: int) -> int:
+    """Return the exact poison-document count for a fixed query budget."""
+
+    if query_count < 0:
+        raise DataError("query count must be non-negative")
+    if type(poison_docs_per_query) is not int or poison_docs_per_query < 0:
+        raise DataError("poison_docs_per_query must be a non-negative integer")
+    return query_count * poison_docs_per_query
+
+
+def allocate_fixed(query_ids: Iterable[str], poison_docs_per_query: int) -> dict[str, int]:
+    """Assign the same number of poison documents to every query."""
+
+    ordered = sorted(str(query_id) for query_id in query_ids)
+    if type(poison_docs_per_query) is not int or poison_docs_per_query < 0:
+        raise DataError("poison_docs_per_query must be a non-negative integer")
+    return {query_id: poison_docs_per_query for query_id in ordered}
 
 
 def actual_ratio(clean_document_count: int, poison_document_count: int) -> float:

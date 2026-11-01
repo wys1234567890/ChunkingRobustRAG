@@ -23,7 +23,7 @@ from ..data.validation import load_documents, load_evidence, load_queries, valid
 from .config import DATASETS, PoisonSettings
 from .identity import poison_doc_id, text_sha256
 from .operators import DECLARATIVE_TEMPLATE, CorruptionCandidate, EntitySubstitutionOperator
-from .ratios import actual_ratio, allocate_variants, poison_count
+from .ratios import actual_ratio, allocate_fixed, allocate_variants, fixed_poison_count, poison_count
 from .safety import BLOCKLIST_VERSION, check_text
 
 DATA_FILES = ("documents.jsonl", "queries.jsonl", "evidence.jsonl", "poison_records.jsonl", "audit_samples.jsonl")
@@ -258,19 +258,25 @@ def build_poison_dataset(
                 raise DataError(f"query {query['query_id']!r} references missing document {doc_id!r}")
 
     clean_count = len(documents)
-    poison_total = poison_count(clean_count, ratio, settings.ratio_denominator)
+    if settings.query_allocation == "fixed_per_query":
+        poison_docs_per_query = settings.poison_budget(ratio)
+        poison_total = fixed_poison_count(len(queries_by_id), poison_docs_per_query)
+        budgets = allocate_fixed(sorted(queries_by_id), poison_docs_per_query)
+    else:
+        poison_docs_per_query = None
+        poison_total = poison_count(clean_count, ratio, settings.ratio_denominator)
+        budgets = (
+            allocate_variants(sorted(queries_by_id), poison_total, seed=settings.seed, dataset=dataset)
+            if poison_total
+            else {query_id: 0 for query_id in queries_by_id}
+        )
     poison_actual = actual_ratio(clean_count, poison_total)
-    if poison_total and poison_total < len(queries):
+    poison_clean_ratio = poison_total / clean_count if clean_count else 0.0
+    if settings.query_allocation != "fixed_per_query" and poison_total and poison_total < len(queries):
         raise DataError(
             f"{dataset}: ratio {ratio} yields {poison_total} poison documents but "
             f"{len(queries)} queries require at least one each; raise the ratio or add documents"
         )
-
-    budgets = (
-        allocate_variants(sorted(queries_by_id), poison_total, seed=settings.seed, dataset=dataset)
-        if poison_total
-        else {query_id: 0 for query_id in queries_by_id}
-    )
     operator = EntitySubstitutionOperator()
     if operator.name != settings.operator or operator.version != settings.operator_version:
         raise DataError("configured operator does not match the implemented operator")
@@ -338,9 +344,11 @@ def build_poison_dataset(
             {
                 **query,
                 "poison_doc_ids": sorted(poison_ids_by_query[query["query_id"]]),
+                "poison_docs_per_query": len(poison_ids_by_query[query["query_id"]]),
                 "poison_question_coverage": 1.0 if poison_total else None,
                 "poison_ratio_target": ratio,
                 "poison_ratio_actual": poison_actual,
+                "poison_ratio_clean": poison_clean_ratio,
                 "poison_version": settings.poison_version,
             }
         )
@@ -391,7 +399,10 @@ def build_poison_dataset(
         "seed": settings.seed,
         "poison_ratio_target": ratio,
         "poison_ratio_actual": poison_actual,
+        "poison_ratio_clean": poison_clean_ratio,
         "ratio_denominator": settings.ratio_denominator,
+        "query_allocation": settings.query_allocation,
+        "poison_docs_per_query": poison_docs_per_query,
         "clean_document_count": clean_count,
         "poison_document_count": poison_total,
         "final_document_count": clean_count + poison_total,

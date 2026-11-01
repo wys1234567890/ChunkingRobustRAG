@@ -166,6 +166,11 @@ def validate_poison_dataset(
     _require(type(ratio) in (int, float) and 0 <= float(ratio) < 1, "invalid poison_ratio_target")
     denominator = manifest.get("ratio_denominator")
     _require(denominator in DENOMINATORS, "invalid ratio_denominator")
+    allocation = manifest.get("query_allocation", "balanced_stable_hash")
+    _require(allocation in ("fixed_per_query", "balanced_stable_hash"), "invalid query_allocation")
+    budget = manifest.get("poison_docs_per_query")
+    if allocation == "fixed_per_query":
+        _require(type(budget) is int and budget >= 0, "invalid poison_docs_per_query")
 
     documents = read_jsonl(directory / "documents.jsonl")
     queries = read_jsonl(directory / "queries.jsonl")
@@ -206,15 +211,23 @@ def validate_poison_dataset(
     _require(manifest.get("poison_document_count") == poison_count_actual, "poison document count mismatch")
     _require(manifest.get("final_document_count") == final_count, "final document count mismatch")
     _require(manifest.get("query_count") == len(queries_by_id), "query count mismatch")
-    expected_poison = poison_count(clean_count, float(ratio), denominator)
+    if allocation == "fixed_per_query":
+        expected_poison = len(queries_by_id) * budget
+    else:
+        expected_poison = poison_count(clean_count, float(ratio), denominator)
     _require(expected_poison == poison_count_actual, f"ratio yields {expected_poison} poison documents, found {poison_count_actual}")
     _require(abs(manifest.get("poison_ratio_actual", -1) - actual_ratio(clean_count, poison_count_actual)) < 1e-12, "poison_ratio_actual mismatch")
+    expected_clean_ratio = poison_count_actual / clean_count if clean_count else 0.0
+    _require(abs(manifest.get("poison_ratio_clean", -1) - expected_clean_ratio) < 1e-12, "poison_ratio_clean mismatch")
 
     poison_ids_by_query = {}
     for query in queries:
         ids = query.get("poison_doc_ids")
         _require(_string_list(ids, nonempty=False), f"query {query['query_id']} has invalid poison_doc_ids")
         _require(all(doc_id in poison_docs for doc_id in ids), "query references a non-poison document")
+        _require(query.get("poison_docs_per_query") == len(ids), f"query {query['query_id']} poison count mismatch")
+        if allocation == "fixed_per_query":
+            _require(len(ids) == budget, f"query {query['query_id']} does not have the fixed poison budget")
         poison_ids_by_query[query["query_id"]] = sorted(ids)
     for poison in poison_docs.values():
         _require(
@@ -233,7 +246,10 @@ def validate_poison_dataset(
     if poison_count_actual:
         _require(expected_coverage == 1.0 and not uncovered, "poison dataset does not cover every query")
         counts = [len(ids) for ids in poison_ids_by_query.values()]
-        _require(max(counts) - min(counts) <= 1, "poison documents are not evenly allocated across queries")
+        if allocation == "balanced_stable_hash":
+            _require(max(counts) - min(counts) <= 1, "poison documents are not evenly allocated across queries")
+        else:
+            _require(all(count == budget for count in counts), "poison documents do not match the fixed query budget")
     else:
         _require(all(not ids for ids in poison_ids_by_query.values()), "0% ratio must not reference poison documents")
         _require(manifest.get("coverage_status") == "baseline_no_poison", "0% coverage status must be baseline_no_poison")
@@ -274,10 +290,13 @@ def validate_poison_dataset(
         "poison_version": manifest.get("poison_version"),
         "poison_ratio_target": ratio,
         "poison_ratio_actual": manifest.get("poison_ratio_actual"),
+        "poison_ratio_clean": manifest.get("poison_ratio_clean"),
         "clean_document_count": clean_count,
         "poison_document_count": poison_count_actual,
         "final_document_count": final_count,
         "query_count": len(queries_by_id),
+        "query_allocation": allocation,
+        "poison_docs_per_query": budget,
         "poison_question_coverage": expected_coverage,
         "uncovered_query_ids": uncovered,
         "blocklist_hit_count": 0,

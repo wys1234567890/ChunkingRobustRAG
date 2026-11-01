@@ -49,29 +49,20 @@ Stage 2 只接受：
 - query、evidence、document 的 `data_version` 和 `schema_version` 一致；
 - 所有 query 都有非空 `ground_truth` 和 `evidence_doc_ids`。
 
-### 2.2 污染比例分母
+### 2.2 Query 级污染预算
 
-默认采用知识库最终文档数作为分母，因为实验表中的“投毒比例”应表示最终索引中污染文档的比例。设 clean 文档数为 `D`，污染文档数为 `P`，目标比例为 `r`，则：
-
-```text
-P = round_half_up(r * D / (1 - r))
-actual_ratio = P / (D + P)
-```
-
-`round_half_up` 必须是十进制定点实现或等价的整数算法，不能受 Python binary float 舍入边界影响。`r=0` 时 `P=0`。如果四舍五入后的 `P` 小于 query 数量 `Q`，构造器必须报错；不能通过重复同一污染文档、让一个文档冒充多个独立样本或降低覆盖率来绕过。
+主线实验把污染强度定义为每个目标 query 的固定污染文档数量。配置中的 `0/5/10/20%` 是实验等级标签，分别对应每个 query 的 `0/1/2/4` 篇专属污染文档；不再根据全库文档数四舍五入后在 query 之间分摊。
 
 研究配置 `D=2000、Q=100` 时，预期数量如下：
 
-| 目标比例 | clean 文档 | poison 文档 P | 最终文档数 | 实际比例 |
-| ---: | ---: | ---: | ---: | ---: |
-| 0% | 2000 | 0 | 2000 | 0% |
-| 5% | 2000 | 105 | 2105 | 约 4.99% |
-| 10% | 2000 | 222 | 2222 | 约 9.99% |
-| 20% | 2000 | 500 | 2500 | 20% |
+| 实验等级 | 每个 query | poison 文档 P | 最终文档数 |
+| ---: | ---: | ---: | ---: |
+| 0% | 0 | 0 | 2000 |
+| 5% | 1 | 100 | 2100 |
+| 10% | 2 | 200 | 2200 |
+| 20% | 4 | 400 | 2400 |
 
-manifest 同时保存 `poison_ratio_target`、`poison_ratio_actual`、`ratio_denominator="final_corpus_documents"`、`clean_document_count`、`poison_document_count` 和 `final_document_count`。结果分析只能使用 `poison_ratio_actual` 分组，不能把目标字符串直接当成实际比例。
-
-如果研究负责人最终希望把比例定义为 `P / D`，只需在配置中显式改为 `ratio_denominator: clean_documents` 并生成新的 `poison_version`；实现程序不能同时混用两个分母。当前默认值就是本节定义的最终知识库分母。
+每条污染文档只服务一个 query，`target_query_ids` 必须是长度为 1 的列表；因此总污染数严格等于 `query_count * poison_docs_per_query`，每个 query 的污染剂量完全一致。`poison_ratio_actual` 仍记录污染文档占最终库的实际比例，另记录 `poison_ratio_clean` 供审计；结果主分析按 query 级预算分组。
 
 ### 2.3 100% 问题覆盖率
 
@@ -84,13 +75,7 @@ question_coverage = len(poisoned_query_ids) / len(all_selected_query_ids)
 
 必须满足 `question_coverage == 1.0`，并在 manifest 中保存完整的 `covered_query_ids`、`uncovered_query_ids=[]` 和 `coverage_definition`。每个污染文档只服务一个 target query：`target_query_ids` 必须是长度为 1 的列表；这样可以避免共享文档造成覆盖率虚高和归因不清。
 
-污染文档数量大于 query 数量时，按稳定哈希将额外样本均匀分配：每题获得 `floor(P/Q)` 或 `ceil(P/Q)` 条，任意两题的数量差不超过 1。分配顺序按 `rank(seed, dataset, query_id)`，不得依赖输入 JSONL 的当前行序。
-
-研究数据的分配结果应为：
-
-- 5%：每题至少 1 条，5 个稳定排序靠前的 query 各得到 2 条，其余 95 题各 1 条；
-- 10%：22 题各 3 条，其余 78 题各 2 条；
-- 20%：每题各 5 条。
+固定预算不使用稳定哈希平衡分配；query ID 只用于稳定排序和生成污染文档 ID。若配置缺少某个实验等级的 `poison_docs_per_query`，构造器必须直接失败。
 
 0% 是 clean baseline。它必须保留全部 100 条 query，因此 `selected_query_coverage=1.0`；由于没有污染文档，`poison_question_coverage` 在 manifest 中写成 `null`，并附 `coverage_status="baseline_no_poison"`，禁止把“无污染”伪报为已发生的污染覆盖。
 
@@ -99,7 +84,7 @@ question_coverage = len(poisoned_query_ids) / len(all_selected_query_ids)
 默认：
 
 ```yaml
-poison_version: fact-v1-entity-append
+poison_version: fact-v2-entity-append-query-budget
 operator_version: entity-substitution-v1
 seed: 42
 ```
@@ -149,7 +134,7 @@ clean 文档字段全部保留；污染文档至少包含：
   "true_fact": "真实值或真实事实的规范字符串",
   "false_fact": "错误值或错误事实的规范字符串",
   "target_query_ids": ["nq-…"],
-  "poison_version": "fact-v1-entity-append",
+  "poison_version": "fact-v2-entity-append-query-budget",
   "data_version": "clean-v4-hardneg",
   "schema_version": "data-v2",
   "corruption_operator_version": "entity-substitution-v1",
@@ -208,8 +193,8 @@ poison_doc_id = "{dataset}-poison-" + digest([
   "poison_doc_ids": ["nq-poison-…"],
   "poison_question_coverage": 1.0,
   "poison_ratio_target": 0.05,
-  "poison_ratio_actual": 0.049881235,
-  "poison_version": "fact-v1-entity-append"
+  "poison_ratio_actual": 0.047619048,
+  "poison_version": "fact-v2-entity-append-query-budget"
 }
 ```
 
@@ -315,7 +300,7 @@ src/poison/
 └─ validation.py
 ```
 
-`config.py`：定义 `PoisonSettings`，解析 `configs/corruption.yaml`，校验 ratio 在 `[0, 1)`、分母枚举、版本命名、seed、最大文本长度和 blocklist 版本。
+`config.py`：定义 `PoisonSettings`，解析 `configs/corruption.yaml`，校验 ratio 在 `[0, 1)`、分母枚举、`fixed_per_query` 的每题预算映射、版本命名、seed、最大文本长度和 blocklist 版本。
 
 `operators.py`：定义稳定的 `CorruptionCandidate` 和 `EntitySubstitutionOperator`。建议公开接口：
 
@@ -386,15 +371,20 @@ python -m scripts.build_corruption `
 clean_data_version: clean-v4-hardneg
 clean_processed_root: data/processed
 poisoned_root: data/poisoned
-poison_version: fact-v1-entity-append
+poison_version: fact-v2-entity-append-query-budget
 operator: entity_substitution
 operator_version: entity-substitution-v1
 template_version: neutral-fact-v1
 seed: 42
 ratios: [0.0, 0.05, 0.10, 0.20]
-ratio_denominator: final_corpus_documents
+ratio_denominator: clean_documents
 question_coverage_required: 1.0
-query_allocation: balanced_stable_hash
+query_allocation: fixed_per_query
+poison_docs_per_query:
+  "0.0": 0
+  "0.05": 1
+  "0.10": 2
+  "0.20": 4
 max_source_chars: 4000
 max_poison_chars: 6000
 blocklist_version: explicit-instruction-v1
@@ -428,11 +418,11 @@ review_status_on_generate: pending
 ### 7.3 比例和覆盖率
 
 - `clean_document_count + poison_document_count == final_document_count`；
-- poison 数量符合配置的整数计算规则；
+- `query_allocation=fixed_per_query` 时，poison 数量严格等于 `query_count * poison_docs_per_query`；
 - `poison_ratio_actual` 可由计数重算；
 - 每个非零 ratio 的 `poison_question_coverage == 1.0`；
 - `uncovered_query_ids == []`；
-- 每个 query 的 poison 文档数符合均衡分配，最大值与最小值之差不超过 1；
+- 每个 query 的 poison 文档数严格等于配置的 `poison_docs_per_query`；
 - 0% 的 poison 文档和 poison record 数为 0，所有 query 的 `poison_doc_ids=[]`。
 
 ### 7.4 内容和安全
@@ -449,12 +439,15 @@ review_status_on_generate: pending
 ```json
 {
   "dataset": "nq",
-  "poison_version": "fact-v1-entity-append",
+  "poison_version": "fact-v2-entity-append-query-budget",
   "poison_ratio_target": 0.05,
-  "poison_ratio_actual": 0.049881235,
+  "poison_ratio_actual": 0.047619048,
+  "poison_ratio_clean": 0.05,
+  "query_allocation": "fixed_per_query",
+  "poison_docs_per_query": 1,
   "clean_document_count": 2000,
-  "poison_document_count": 105,
-  "final_document_count": 2105,
+  "poison_document_count": 100,
+  "final_document_count": 2100,
   "query_count": 100,
   "poison_question_coverage": 1.0,
   "uncovered_query_ids": [],
@@ -507,18 +500,18 @@ python -m scripts.build_corruption --config configs/corruption.yaml --dataset nq
 
 新增 `tests/test_corruption.py`，使用小型合成 fixture，不下载真实 NQ/HotpotQA、不使用 API、不依赖 E5。测试必须覆盖：
 
-### 10.1 比例计算
+### 10.1 Query 级预算
 
-- `D=2000` 得到 `P=0/105/222/500`；
+- `Q=100` 且每题预算为 `0/1/2/4` 时得到 `P=0/100/200/400`；
 - `actual_ratio` 可复算；
 - `ratio=0`、重复 ratio、负 ratio、`ratio>=1`、非法 denominator 抛 `DataError`；
-- 小数据集在 `P<Q` 时失败并报告最小所需数量。
+- 缺少 `poison_docs_per_query` 映射或 query 级预算不一致时失败。
 
 ### 10.2 覆盖和分配
 
 - 4 条 query、足够 clean docs 的 fixture 在每个非零 ratio 都使覆盖率为 1.0；
 - `poison_doc_ids` 与反向 `target_query_ids` 完全一致；
-- 分配稳定且最大/最小差不超过 1；
+- 每个 query 的 `poison_doc_ids` 数量严格等于配置预算；
 - 改变输入 JSONL 行顺序不改变 doc ID、query 分配、poison 文本和输出哈希；
 - 0% 不生成 poison record，query 全部保留。
 
@@ -561,7 +554,7 @@ python -m scripts.build_corruption --config configs/corruption.yaml --dataset al
   "status": "validated",
   "dataset": "nq",
   "clean_data_version": "clean-v4-hardneg",
-  "poison_version": "fact-v1-entity-append",
+  "poison_version": "fact-v2-entity-append-query-budget",
   "schema_version": "data-v2",
   "operator": "entity_substitution",
   "operator_version": "entity-substitution-v1",
@@ -569,10 +562,12 @@ python -m scripts.build_corruption --config configs/corruption.yaml --dataset al
   "blocklist_version": "explicit-instruction-v1",
   "seed": 42,
   "poison_ratio_target": 0.05,
-  "ratio_denominator": "final_corpus_documents",
+  "ratio_denominator": "clean_documents",
+  "query_allocation": "fixed_per_query",
+  "poison_docs_per_query": 1,
   "clean_document_count": 2000,
-  "poison_document_count": 105,
-  "final_document_count": 2105,
+  "poison_document_count": 100,
+  "final_document_count": 2100,
   "query_count": 100,
   "poison_question_coverage": 1.0,
   "covered_query_ids": ["…"],
@@ -627,7 +622,7 @@ Stage 2 只有在以下条件同时满足时才算完成：
 
 - NQ 和 HotpotQA 的 0/5/10/20 四个目录都存在且通过 `validate_poison_dataset`；
 - 每个非零 ratio 的 `poison_question_coverage` 精确等于 1.0；
-- 研究规模下实际 poison 数分别为 0/105/222/500（默认最终文档分母）；
+- 研究规模下实际 poison 数分别为 0/100/200/400，且每个 query 的预算严格为 0/1/2/4；
 - 每条污染记录可追溯 source doc、evidence、query、true fact、false fact 和 operator 版本；
 - 静态 blocklist 命中为 0，自动拒绝样本不进入发布文件；
 - clean 输入文件哈希与构造前一致；
@@ -648,6 +643,6 @@ Stage 2 只有在以下条件同时满足时才算完成：
 
 报告问题时至少附：dataset、clean_data_version、ratio、query_id、source_doc_id、候选文本摘要、失败规则、相关 manifest/input fingerprint。禁止通过删除问题、降低覆盖率、复制样本或修改 clean 数据来掩盖失败。
 
-## 15. 当前需要确认的一个实验口径
+## 15. 当前实验口径
 
-本文默认“5%/10%/20%”按最终知识库文档数计算，因此研究规模下污染文档数是 105/222/500；这样既符合最终索引中的比例含义，也能在每个非零比例为 100 条 query 分配至少一条污染文档。如果你希望沿用“污染文档数 / clean 文档数”的口径，需把 `ratio_denominator` 改为 `clean_documents`，对应数量会变为 100/200/400，并生成新的 `poison_version`，不能混用两种结果。
+主线采用 query 级固定污染预算：0/5/10/20% 四个等级分别对应每个 query 0/1/2/4 篇污染文档。研究规模下总数为 0/100/200/400；最终文档库中的实际占比分别由 manifest 的 `poison_ratio_actual` 记录。该设计优先保证每个 query 的攻击剂量一致，避免污染数量在 query 之间不均匀造成混淆。
