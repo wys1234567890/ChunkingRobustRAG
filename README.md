@@ -1,6 +1,6 @@
 # ChunkingRobustRAG
 
-仓库包含阶段 0 的 API/环境契约和阶段 1 的数据准备、证据对齐流程。研究主线使用 OpenAI-compatible Chat Completions 接口生成答案和执行 judge；embedding 保持本地 E5，避免同时改变多个实验变量。
+仓库包含阶段 0 的 API/环境契约、阶段 1 的数据准备与证据对齐、阶段 2 的隐式事实污染数据集、阶段 3 的分块与检索模块，以及阶段 4 的 API RAG 推理。研究主线使用 OpenAI-compatible Chat Completions 接口生成答案和执行 judge；embedding 保持本地 E5，避免同时改变多个实验变量。阶段 5（自动评估）及以后依赖批量 LLM 调用，在阶段 4 跑通后再实现。
 
 ## 环境
 
@@ -146,4 +146,170 @@ report = validate_dataset(directory)
 人工分别核查两个数据集的 20 条审计样本，检查答案来源、证据位置及 HotpotQA 多跳链。将审核人、结论、备注和对应 manifest 哈希记入独立的 `data/reviews/` 文件，不直接修改冻结的审计样本；发现清洗/对齐问题时修正规则，增加版本后重跑。
 
 验收统计使用字符数和空白分词数，不提前固定阶段 3 tokenizer。实验结论限于短答案、受控规模开发集语料库；NQ 文档是页面、HotpotQA 文档是段落，两者长度分布在各自 manifest 中单独报告。原始数据、生成产物和审核记录被 Git 忽略，合成测试样本随代码保存。
+
+## 阶段 2：隐式事实污染数据集
+
+本阶段读取阶段 1 的冻结干净库，按目标 query 注入**隐式事实污染**：把真实答案替换为一个结构相同但错误的陈述，写成普通说明句，不含“忽略上文”“请回答”等显式指令。完整规格见 `stage2.md`，配置固定在 `configs/corruption.yaml`。
+
+```powershell
+python -m scripts.build_corruption --dataset all
+python -m scripts.build_corruption --dataset all --validate-only
+```
+
+- 比例固定为 `0/5/10/20%`，分母是最终知识库文档数 `D`（含污染文档），污染条数 `P = round_half_up(r * D / (1 - r))`，因此 `P / (D + P) = r`。干净库有 2,000 篇文档时，三档污染分别为 105、222、500 条。
+- 每个选中 query 至少保留一个专属污染文档；`P >= Q` 是硬性前提，否则直接失败，不能降低 query 覆盖率。污染文档按稳定哈希在 query 间均衡分配。
+- 输出目录为 `data/poisoned/fact-v1-entity-append/<dataset>/ratio-0p00|0p05|0p10|0p20/`，每个目录包含 `documents.jsonl`、`queries.jsonl`、`evidence.jsonl`、`poison_records.jsonl`、`audit_samples.jsonl` 和 `manifest.json`。
+- `poison_records.jsonl` 逐条记录真实事实、错误事实、来源文档、来源证据、替换次数、构造方式、审核状态和文本哈希，可完整回溯；`queries.jsonl` 增加 `poison_doc_ids`、`poison_ratio_target`、`poison_ratio_actual` 和 `poison_version`。
+- 生成过程先写 staging 目录，再用独立的 `validate_poison_dataset` 校验 ID、哈希、真实事实是否彻底消失、错误事实是否出现、显式指令 blocklist、query 覆盖率、比例和均衡分配；全部通过后才原子重命名为正式目录，失败会删除 staging，不会留下半成品。
+- `status=validated` 只表示自动验收通过，`human_review_status=pending` 仍待人工抽查；发现问题时修改规则并提升 `poison_version` 重跑，不覆盖旧版本。
+- 程序行为可用合成样本验证：`python -m scripts.build_corruption --synthetic --dataset nq`，产物与真实研究数据隔离。
+
+## 阶段 3：分块与检索
+
+本阶段读取阶段 1/2 的 `documents.jsonl`，按文档生成 chunk JSONL；输入可以是干净库，也可以是带 `is_poison=true` 的事实污染库。分块只索引文档正文，不把问题、答案或证据标签拼进知识库。
+
+### 统一 chunk schema
+
+每个 chunk 输出以下字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `chunk_id` | 由文档、策略、参数、span 和文本哈希生成的稳定 ID |
+| `doc_id` | 来源文档 ID，不会跨文档拼接 |
+| `text` | 恰好等于 `document.text[start:end]` |
+| `start` / `end` | Python Unicode 字符索引，左闭右开 |
+| `is_poison` | 从源文档复制；缺失或非布尔值直接报错，避免污染文档被误当干净文档 |
+| `strategy` | `fixed`、`semantic` 或 `hierarchical` |
+| `chunk_size` | 以 tokenizer 计算的 token 预算 |
+| `overlap` | 重叠比例（0–1 之间） |
+| `tokenizer` | 实际使用的 tokenizer 名称，随 chunk 冻结 |
+| `token_count` | 该 chunk 文本重新分词后的实际 token 数，保证不超过 `chunk_size` |
+| `dataset` / `source_doc_id` / `poison_version` | 数据集与污染溯源字段，便于回连阶段 2 记录 |
+| `section_path` | hierarchical 的层级路径，如 `["Root", "Child"]`；无标题文档记为 `["body"]`，其余策略为空 |
+
+同一文档内不会出现空块、完全相同的 span 或跨文档串接；重叠块具有不同的 `start/end`，因此仍可区分。
+
+按 token 窗口切片后，片段重新分词可能比全文分词多出边界 token。生成 chunk 时会按片段自身分词结果收缩末尾，保证 `token_count <= chunk_size`；因此固定长度块的实际长度可能略小于预算。
+
+### 分块策略
+
+- `fixed`：按 token 窗口切分，`step = chunk_size - int(chunk_size * overlap)`。
+- `semantic`：先按句末标点和换行得到句子边界，再把完整句子装入 token 预算；超长单句回退到窗口切分。
+- `hierarchical`：解析 Markdown 标题层级，按节切分并记录父级到当前标题的 `section_path`，节内再做窗口切分；无标题时按空行分段，单段落时按句子分节。因此即使文档没有标题，hierarchical 也不会退化成 fixed。
+
+### 构建 chunk 库
+
+研究主线使用本地 E5 对应 tokenizer，保证 chunk-size 与 embedding 模型口径一致：
+
+```powershell
+python -m scripts.chunk_documents `
+  --input data/processed/clean-v1/nq/documents.jsonl `
+  --output-dir data/processed/chunks/nq `
+  --strategies fixed,semantic,hierarchical `
+  --chunk-sizes 256,512,1024,2048 `
+  --overlaps 0,0.1,0.2 `
+  --tokenizer hf:intfloat/multilingual-e5-small
+```
+
+离线冒烟测试可显式使用空白分词器；它只用于检查程序行为，不能作为研究结果：
+
+```powershell
+python -m scripts.chunk_documents `
+  --input data/processed/clean-v1/nq/documents.jsonl `
+  --output-dir data/processed/chunks/nq-smoke `
+  --strategies fixed,semantic,hierarchical `
+  --chunk-sizes 512 `
+  --overlaps 0 `
+  --tokenizer whitespace `
+  --limit 10
+```
+
+每个配置生成一个 JSONL，并写入 `manifest.json`，记录源文件哈希、tokenizer、chunk 数、输出哈希和 `chunk_config_version=stage3-v1`。更换 tokenizer、chunk-size 或 overlap 后必须重新生成并保留新版本，不能覆盖旧实验配置。
+
+### 检索
+
+BM25 与本地 E5 使用同一接口，`Top-k` 默认固定为 5：
+
+```powershell
+python -m scripts.retrieve --chunks data/processed/chunks/nq/fixed-cs512-ov00.jsonl --query "who wrote the declaration of independence" --retriever bm25
+python -m scripts.retrieve --chunks data/processed/chunks/nq/fixed-cs512-ov00.jsonl --query "who wrote the declaration of independence" --retriever e5
+python -m scripts.retrieve --chunks data/processed/chunks/nq/fixed-cs512-ov00.jsonl --queries data/processed/clean-v1/nq/queries.jsonl --retriever both --top-k 5 --output results/stage3/retrieval.jsonl
+```
+
+- BM25：`rank-bm25` Okapi，Unicode 词级切分，按分数降序、`chunk_id` 升序稳定打破平局。
+- E5：`sentence-transformers` 加载 `intfloat/multilingual-e5-small`，query 加 `query: `、chunk 加 `passage: ` 前缀，归一化后做余弦相似度。该模型最大输入为 512 token；`chunk_size` 为 1024/2048 时 embedding 会被截断，实验记录中必须注明，或改用支持长上下文的 embedding 模型。离线环境可把完整模型目录放到 `models/intfloat-multilingual-e5-small/`，`scripts/retrieve.py` 用 `--model-name models/intfloat-multilingual-e5-small`，并配合 `HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1`。
+- 每条结果包含 `score`、`rank`、`retriever`、`retriever_version`，并保留完整 chunk 字段；版本串记录包版本和 BM25 参数或 E5 模型名。
+
+### 验收
+
+```powershell
+python -m pytest tests/test_chunking.py tests/test_retrieval.py
+```
+
+测试覆盖三种策略的 span 回读、重叠、句子边界、层级边界与父级路径、无标题文档的层级退化、污染标记、重复 ID、非法参数，以及 BM25/E5 的 Top-5 返回与稳定排序。真实 E5 首次运行会下载模型；没有本地模型时先完成 BM25 和注入式假模型测试，不要因此跳过接口验收。
+
+## 阶段 4：API RAG 推理
+
+本阶段把阶段 3 的检索结果接入 LLM，生成每条 query 的最终答案。核心模块是 `src/rag.py`，脚本是 `scripts/run_experiment.py`。
+
+### RAG pipeline
+
+`RagPipeline` 串联三个步骤：
+
+1. **检索**：调用传入的 `Retriever`（BM25 或本地 E5）取 Top-k chunk。
+2. **上下文构造**：`build_context` 把命中的 chunk 按排名编号拼成 `[1] ... [2] ...` 文本块。
+3. **生成**：`build_messages` 组装 system prompt + user（含 context 和 question），交给 `ApiClient.generate`。
+
+system prompt 只要求模型基于给定上下文回答、证据不足时说不知道，不包含任何与投毒相关的指令；污染文档本身也不携带控制模型行为的文本。缓存键由 `ApiClient` 基于 messages + 模型 + 参数 + `prompt_version` + `config_version` 生成，因此相同的检索上下文会命中缓存，不同 chunk 配置互不干扰。
+
+### 结果 schema
+
+每条结果写入一行 JSONL，字段对应规划 10.2 并补充阶段 4 可计算的信息：
+
+| 字段 | 说明 |
+| --- | --- |
+| `query_id` / `dataset` / `question` | 问题身份 |
+| `chunk_type` / `chunk_size` / `overlap` | 分块配置（从 chunk 文件首条推断） |
+| `retriever` / `retriever_version` / `top_k` | 检索配置 |
+| `poison_ratio` / `poison_version` | 污染元数据 |
+| `retrieved_poison` | Top-k 中是否存在 `is_poison=true` 的 chunk |
+| `retrieved_chunk_ids` / `poison_chunk_ids` | 召回的 chunk ID 列表 |
+| `ground_truth` / `false_facts` | 真实答案和该 query 对应的错误事实（来自 `poison_records.jsonl`） |
+| `model_output` | 模型生成文本；失败时为空字符串 |
+| `api_status` / `error_code` / `cache_hit` / `retry_count` | API 调用状态 |
+| `api_model` / `prompt_version` / `config_version` | 版本溯源 |
+| `latency_ms` / `input_tokens` / `output_tokens` / `estimated_cost` / `request_id` | 工程指标 |
+
+`judge_label`、`clean_correct` 等评估字段留到阶段 5 填充。
+
+### 运行实验
+
+```powershell
+python -m scripts.run_experiment `
+  --chunks data/processed/chunks/fact-v1/nq/ratio-0p05/fixed-cs512-ov00.jsonl `
+  --queries data/poisoned/fact-v1-entity-append/nq/ratio-0p05/queries.jsonl `
+  --poison-records data/poisoned/fact-v1-entity-append/nq/ratio-0p05/poison_records.jsonl `
+  --retriever bm25 `
+  --top-k 5 `
+  --output results/stage4/nq-0p05-fixed-bm25.jsonl `
+  --poison-ratio 0.05 `
+  --dataset nq
+```
+
+- `--limit N` 只处理前 N 条 query，用于 smoke test。
+- `--poison-records` 可选；提供后会把 `target_query_id` 对应的 `false_fact.value` 挂到结果的 `false_facts` 字段。
+- 输出以**追加模式**写入，已存在的 `query_id` 会被跳过，因此中断后重跑可续跑，不会重复调用 API。
+- API key 从 `.env` 或环境变量读取，不写入结果或日志。
+
+### 验收
+
+```powershell
+python -m pytest tests/test_rag.py
+```
+
+测试覆盖上下文编号、Top-k 截断、prompt 结构、`retrieved_poison` 判定、`ground_truth`/`false_facts` 透传、API 错误透传（`api_status=error`、`error_code` 保留）、空 `query_id` 拒绝，以及缓存命中时不重复调用 API。
+
+## 阶段 2 与阶段 3 的边界
+
+阶段 4 的 RAG 推理依赖真实 LLM API，但阶段 2 的污染数据、阶段 3 的分块与本地 BM25/E5 检索都不依赖外部 API，可以离线复现。阶段 5（规则评估 + LLM-as-judge）和阶段 6（统计与可视化）在阶段 4 结果稳定后实现。
 

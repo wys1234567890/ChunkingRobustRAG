@@ -15,10 +15,15 @@ htmlcov/
 results/cache/
 results/logs/
 results/raw/
+results/stage3/
+results/stage4/
 *.log
 data/raw/
+data/clean-hf-v4-hardneg/
 data/processed/
 data/manifests/
 data/poisoned/
 data/reviews/
+data/synthetic/
+data/chunks-smoke/
 
