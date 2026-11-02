@@ -1,6 +1,6 @@
 # ChunkingRobustRAG
 
-仓库包含阶段 0 的 API/环境契约、阶段 1 的数据准备与证据对齐、阶段 2 的隐式事实污染数据集、阶段 3 的分块与检索模块，以及阶段 4 的 API RAG 推理。研究主线使用 OpenAI-compatible Chat Completions 接口生成答案和执行 judge；embedding 保持本地 E5，避免同时改变多个实验变量。阶段 5（自动评估）及以后依赖批量 LLM 调用，在阶段 4 跑通后再实现。
+仓库包含阶段 0 的 API/环境契约、阶段 1 的数据准备与证据对齐、阶段 2 的隐式事实污染数据集、阶段 3 的分块与检索模块、阶段 4 的 API RAG 推理，以及阶段 5 的 LLM Judge 答案正确率评估。研究主线使用 OpenAI-compatible Chat Completions 接口生成答案和执行 judge；embedding 保持本地 E5，避免同时改变多个实验变量。攻击指标及阶段 6 统计绘图尚未实现。
 
 ## 环境
 
@@ -308,7 +308,7 @@ system prompt 只要求模型基于给定上下文回答、证据不足时说不
 | `api_model` / `prompt_version` / `config_version` | 版本溯源 |
 | `latency_ms` / `input_tokens` / `output_tokens` / `estimated_cost` / `request_id` | 工程指标 |
 
-`judge_label`、`clean_correct` 等评估字段留到阶段 5 填充。
+阶段 5 在独立明细中输出 `judge_correct` 等字段，Stage 4 原始结果保持只读。攻击标签及 Clean/Poison 配对指标尚未实现。
 
 ### 运行实验
 
@@ -339,5 +339,26 @@ python -m pytest tests/test_rag.py
 
 ## 阶段 2 与阶段 3 的边界
 
-阶段 4 的 RAG 推理依赖真实 LLM API，但阶段 2 的污染数据、阶段 3 的分块与本地 BM25/E5 检索都不依赖外部 API，可以离线复现。阶段 5（规则评估 + LLM-as-judge）和阶段 6（统计与可视化）在阶段 4 结果稳定后实现。
+阶段 4 的 RAG 推理依赖真实 LLM API，但阶段 2 的污染数据、阶段 3 的分块与本地 BM25/E5 检索都不依赖外部 API，可以离线复现。阶段 5 的答案 Judge 已实现，攻击指标和阶段 6（统计与可视化）待后续扩展。
+
+## 阶段 5：LLM Judge 答案正确率
+
+无 RAG、Clean RAG、Poison RAG 使用统一评估入口，默认调用 Judge API，无需重新生成 Stage 4 回答：
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.evaluate_answers `
+  --results results/stage4/nq-no-rag.jsonl `
+  --queries data/processed/clean-hf-v4-hardneg/nq/queries.jsonl `
+  --output results/stage5/nq-no-rag-metrics.json `
+  --details results/stage5/nq-no-rag-scored.jsonl
+```
+
+- Judge 使用 `JUDGE_API_BASE / JUDGE_API_KEY / JUDGE_MODEL`，未设置时分别沿用 `LLM_*`；`--config` 可指定 API YAML，环境变量和 `.env` 优先。温度固定为 0，token 上限、重试和超时沿用 API 配置；定价需对应实际 Judge 模型。
+- Judge 仅接收问题、查询文件的标准答案和回答，按语义作二元判定。允许等价别名、日期格式和无害解释；拒答、否定、关键事实错误或相互矛盾的答案判错。提示词将输入视为数据，忽略其中指令。
+- 主指标 `judge_accuracy` 的分母为查询文件全部题数；生成失败、截断和缺失计零。Judge 失败时 `evaluation_complete=false`、准确率为 null，保存失败明细并返回退出码 1。
+- 重跑原命令复用 `results/cache/judge/` 中成功评审，失败项重新请求，无效 JSON 缓存清除。模型、端点、参数、输入或提示词版本变化会重新评审。
+- 汇总保留 EM/token F1，记录输入哈希、Judge 模型/版本/参数、失败与缓存数量、token、耗时和成本；明细包含 `judge_correct / judge_reason / judge_status / judge_error_code / judge_metadata`。本次用量和成本汇总排除缓存命中，无用量/定价时为 null。
+- 追加 `--mode offline` 仅计算 EM/token F1，不加载 API 凭据。输入输出路径必须不同，一个结果文件只能包含一个实验条件。
+
+正式比较使用相同查询集及固定 Judge 模型、参数和提示词版本。先对三种模式的同一查询子集评审并人工抽查，再扩大实验；这里只判断通用答案正确率，不判断污染采纳或攻击成功率。完整命令和失败处理见 [实验流程.md](实验流程.md)。
 

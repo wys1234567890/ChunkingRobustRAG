@@ -22,7 +22,7 @@ def normalize_answer(text: str) -> str:
 def score_answer(prediction: str, answers: Sequence[str]) -> dict[str, float]:
     if not isinstance(prediction, str):
         raise ValueError("model_output must be a string")
-    if not answers or isinstance(answers, str) or any(not isinstance(a, str) or not a.strip() for a in answers):
+    if not isinstance(answers, (list, tuple)) or not answers or any(not isinstance(a, str) or not a.strip() for a in answers):
         raise ValueError("ground_truth must be a non-empty list of non-empty answer strings")
     predicted = normalize_answer(prediction)
     em = f1 = 0.0
@@ -39,8 +39,8 @@ def score_answer(prediction: str, answers: Sequence[str]) -> dict[str, float]:
     return {"em": em, "token_f1": f1}
 
 
-def evaluate_answers(queries: Sequence[dict], records: Sequence[dict]) -> tuple[dict, list[dict]]:
-    """Use the query set as denominator; missing and failed requests score zero."""
+def validate_answer_inputs(queries: Sequence[dict], records: Sequence[dict]) -> tuple[dict, dict]:
+    """Validate the entire run before scoring or making any Judge requests."""
     if not queries:
         raise ValueError("query set is empty")
     gold: dict[str, dict] = {}
@@ -49,11 +49,13 @@ def evaluate_answers(queries: Sequence[dict], records: Sequence[dict]) -> tuple[
         if not isinstance(qid, str) or not qid or qid in gold:
             raise ValueError(f"invalid or duplicate query_id in query set: {qid!r}")
         score_answer("", q.get("ground_truth"))
+        if not isinstance(q.get("question"), str) or not q["question"].strip():
+            raise ValueError(f"invalid question: {qid}")
         gold[qid] = q
     indexed: dict[str, dict] = {}
     for r in records:
         qid = r.get("query_id")
-        if qid not in gold:
+        if not isinstance(qid, str) or qid not in gold:
             raise ValueError(f"unknown result query_id: {qid!r}")
         if qid in indexed:
             raise ValueError(f"duplicate result query_id: {qid!r}")
@@ -61,6 +63,8 @@ def evaluate_answers(queries: Sequence[dict], records: Sequence[dict]) -> tuple[
             raise ValueError(f"question mismatch: {qid}")
         if r.get("api_status") not in {"success", "error"}:
             raise ValueError(f"invalid api_status: {qid}")
+        if r["api_status"] == "success" and not isinstance(r.get("model_output"), str):
+            raise ValueError(f"model_output must be a string: {qid}")
         indexed[qid] = r
     # A single result file must describe a single experimental condition.
     conditions = {tuple(str(r.get(k)) for k in (
@@ -70,10 +74,18 @@ def evaluate_answers(queries: Sequence[dict], records: Sequence[dict]) -> tuple[
     )) for r in records}
     if len(conditions) > 1:
         raise ValueError("mixed experimental conditions; evaluate each run separately")
+    return gold, indexed
+
+
+def evaluate_answers(queries: Sequence[dict], records: Sequence[dict]) -> tuple[dict, list[dict]]:
+    """Use the query set as denominator; missing and failed requests score zero."""
+    gold, indexed = validate_answer_inputs(queries, records)
     details: list[dict[str, Any]] = []
     for qid, q in gold.items():
         r = indexed.get(qid)
         status = r["api_status"] if r else "missing"
+        if r and r.get("error_code") == "truncated_response":
+            status = "error"
         scores = score_answer(r.get("model_output"), q["ground_truth"]) if status == "success" else {"em": 0.0, "token_f1": 0.0}
         details.append({"query_id": qid, "question": q["question"], "ground_truth": q["ground_truth"],
                         "model_output": r.get("model_output", "") if r else "", "api_status": status, **scores})

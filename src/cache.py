@@ -66,3 +66,7 @@ class CacheStore:
         )
         os.replace(temporary, path)
 
+    def invalidate(self, key: str) -> None:
+        """Remove a response that failed downstream validation."""
+        self._path(key).unlink(missing_ok=True)
+

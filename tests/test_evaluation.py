@@ -66,7 +66,7 @@ def test_cli_writes_summary_and_details(tmp_path, capsys):
     queries.write_text(json.dumps(query("1")) + "\n", encoding="utf-8")
     results.write_text(json.dumps(result("1")) + "\n", encoding="utf-8")
     assert main(["--queries", str(queries), "--results", str(results),
-                 "--output", str(summary), "--details", str(details)]) == 0
+                 "--output", str(summary), "--details", str(details), "--mode", "offline"]) == 0
     assert json.loads(summary.read_text(encoding="utf-8"))["em"] == 1
     assert json.loads(details.read_text(encoding="utf-8"))["query_id"] == "1"
     assert "EM=100.00%" in capsys.readouterr().out

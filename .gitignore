@@ -17,6 +17,8 @@ results/logs/
 results/raw/
 results/stage3/
 results/stage4/
+results/stage5/
+results/test-tmp/
 *.log
 data/raw/
 data/clean-hf-v4-hardneg/
