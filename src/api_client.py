@@ -105,6 +105,10 @@ class ApiClient:
                     max_tokens=self.settings.max_tokens,
                 )
                 result = self._response_result(response, request_id, retries, started)
+                if result.error_code == "empty_response" and retries < self.settings.max_retries:
+                    self._sleep(min(2**retries, 8))
+                    retries += 1
+                    continue
                 if result.status == "success":
                     self.cache.save(key, asdict(result))
                 self._log_result(result)

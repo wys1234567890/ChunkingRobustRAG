@@ -108,7 +108,7 @@ def test_retryable_error_is_retried(tmp_path):
 
 
 def test_empty_response_is_error_and_not_cached(tmp_path):
-    completions = FakeCompletions([FakeResponse([])])
+    completions = FakeCompletions([FakeResponse([])] * 3)
     client = ApiClient(
         _settings(tmp_path),
         client=FakeClient(completions),
@@ -121,7 +121,43 @@ def test_empty_response_is_error_and_not_cached(tmp_path):
     )
     assert result.status == "error"
     assert result.error_code == "empty_response"
+    assert result.retry_count == 2
+    assert completions.calls == 3
     assert not list((tmp_path / "cache").glob("*.json"))
+
+
+def test_empty_content_retries_then_success_is_cached(tmp_path):
+    from dataclasses import replace
+
+    completions = FakeCompletions([
+        FakeResponse([FakeChoice(FakeMessage(None))]),
+        FakeResponse([FakeChoice(FakeMessage("  "))]),
+        TimeoutError("temporary"),
+        FakeResponse([FakeChoice(FakeMessage("ok"))]),
+    ])
+    delays = []
+    client = ApiClient(replace(_settings(tmp_path), max_retries=3),
+                       client=FakeClient(completions), sleep_fn=delays.append)
+    messages = [{"role": "user", "content": "hello"}]
+    result = client.generate(messages, request_id="empty-then-ok")
+    assert result.status == "success"
+    assert result.retry_count == 3
+    assert completions.calls == 4
+    assert delays == [1, 2, 4]
+    assert client.generate(messages, request_id="cached").cache_hit
+    assert completions.calls == 4
+
+
+def test_empty_response_with_zero_retries(tmp_path):
+    from dataclasses import replace
+
+    completions = FakeCompletions([FakeResponse([])])
+    client = ApiClient(replace(_settings(tmp_path), max_retries=0),
+                       client=FakeClient(completions), sleep_fn=lambda _: None)
+    result = client.generate([{"role": "user", "content": "hello"}], request_id="zero")
+    assert result.error_code == "empty_response"
+    assert result.retry_count == 0
+    assert completions.calls == 1
 
 
 def test_client_error_is_not_retried(tmp_path):

@@ -1,9 +1,10 @@
-"""Stage 4: run a RAG experiment over queries with one chunk config + retriever.
+"""Stage 4: run a no-RAG baseline or RAG with one chunk config + retriever.
 
-Reads a Stage 3 chunk store and a Stage 1/2 query set, retrieves Top-k chunks
+RAG reads a Stage 3 chunk store and a Stage 1/2 query set, retrieves Top-k chunks
 per query, builds the RAG prompt, and calls the configured LLM API. Results are
 appended to ``--output`` JSONL; existing ``query_id`` records are skipped so the
 experiment can be resumed after interruption.
+Use --no-rag to answer queries without a chunk store or retriever.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from src.api_client import ApiClient
@@ -45,10 +47,11 @@ def _done_query_ids(path: Path) -> set[str]:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--chunks", required=True, type=Path, help="chunk JSONL from scripts/chunk_documents.py")
+    parser.add_argument("--chunks", type=Path, help="chunk JSONL; required for RAG")
+    parser.add_argument("--no-rag", action="store_true", help="answer from model knowledge without loading chunks or a retriever")
     parser.add_argument("--queries", required=True, type=Path, help="query JSONL with query_id and question")
     parser.add_argument("--poison-records", type=Path, default=None, help="poison_records.jsonl for false_fact lookup")
-    parser.add_argument("--retriever", choices=("bm25", "e5"), required=True)
+    parser.add_argument("--retriever", choices=("bm25", "e5"))
     parser.add_argument("--top-k", type=int, default=TOP_K)
     parser.add_argument("--model-name", default=DEFAULT_E5_MODEL, help="E5 model name or local path")
     parser.add_argument("--device", default=None, help="E5 device: auto (default), cpu, cuda, xpu or xpu:0")
@@ -61,7 +64,13 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.no_rag:
+        if args.chunks or args.retriever or args.poison_records or args.poison_ratio is not None:
+            parser.error("--no-rag cannot be combined with chunks, retriever or poison options")
+    elif not args.chunks or not args.retriever:
+        parser.error("RAG requires --chunks and --retriever; use --no-rag for the baseline")
     if args.top_k <= 0:
         print("--top-k must be positive", file=sys.stderr)
         return 2
@@ -71,13 +80,15 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         settings = load_settings(args.config)
+        if args.no_rag:
+            settings = replace(settings, prompt_version="no-rag-v1")
         settings.validate(require_credentials=True)
     except ConfigError as exc:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
 
-    chunks = load_chunks(args.chunks)
-    if not chunks:
+    chunks = [] if args.no_rag else load_chunks(args.chunks)
+    if not args.no_rag and not chunks:
         print("chunk store is empty", file=sys.stderr)
         return 2
     queries = read_jsonl(args.queries)
@@ -90,10 +101,15 @@ def main(argv: list[str] | None = None) -> int:
     false_facts_map = _false_facts_by_query(args.poison_records)
     done = _done_query_ids(args.output)
 
-    sample = chunks[0]
-    dataset = args.dataset or sample.dataset
+    sample = chunks[0] if chunks else None
+    dataset = args.dataset or (sample.dataset if sample else str(queries[0].get("dataset", "")))
 
-    retriever = build_retriever(
+    if args.output.exists():
+        for record in read_jsonl(args.output):
+            if record.get("retriever") != ("none" if args.no_rag else args.retriever):
+                parser.error("output contains a different retrieval mode; choose a separate output file")
+
+    retriever = None if args.no_rag else build_retriever(
         args.retriever,
         chunks,
         e5_model_name=args.model_name,
@@ -104,11 +120,11 @@ def main(argv: list[str] | None = None) -> int:
         retriever=retriever,
         api_client=api,
         top_k=args.top_k,
-        chunk_type=sample.strategy,
-        chunk_size=sample.chunk_size,
-        overlap=sample.overlap,
+        chunk_type=sample.strategy if sample else "none",
+        chunk_size=sample.chunk_size if sample else 0,
+        overlap=sample.overlap if sample else 0.0,
         poison_ratio=args.poison_ratio,
-        poison_version=sample.poison_version,
+        poison_version=sample.poison_version if sample else None,
         dataset=dataset,
     )
 

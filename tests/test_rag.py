@@ -218,3 +218,31 @@ def test_run_cache_hit_skips_api_call(tmp_path):
     assert second.cache_hit is True
     completions = pipeline.api._client.chat.completions
     assert completions.calls == 1
+
+
+def test_no_rag_uses_knowledge_prompt_and_records_no_retrieval(tmp_path):
+    from dataclasses import replace
+
+    pipeline = _pipeline(tmp_path, [], [FakeResponse([FakeChoice(FakeMessage("Beatles"))])])
+    pipeline.retriever = None
+    # Construct through the public no-RAG path to set top_k=0.
+    pipeline = RagPipeline(None, pipeline.api, dataset="nq")
+    pipeline.api.settings = replace(pipeline.api.settings, prompt_version="no-rag-v1")
+    captured = []
+    original = pipeline.api.generate
+
+    def generate(messages, **kwargs):
+        captured.extend(messages)
+        return original(messages, **kwargs)
+
+    pipeline.api.generate = generate
+    r = pipeline.run("q1", "Who sold the most records?", ground_truth=["Beatles"])
+    assert r.retriever == "none"
+    assert r.top_k == 0
+    assert r.retrieved_chunk_ids == []
+    assert r.retrieved_poison is False
+    assert r.prompt_version == "no-rag-v1"
+    assert "your own knowledge" in captured[0]["content"]
+    assert "Context:" not in captured[1]["content"]
+    assert "Beatles" not in str(captured)
+    assert r.model_output == "Beatles"

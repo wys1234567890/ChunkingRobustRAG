@@ -23,6 +23,12 @@ SYSTEM_PROMPT = (
     "Keep your answer concise and factual."
 )
 
+NO_RAG_SYSTEM_PROMPT = (
+    "You are a question-answering assistant. Answer the user's question using "
+    "your own knowledge. If you do not know the answer, say that you do not know. "
+    "Keep your answer concise and factual."
+)
+
 
 class RagError(ValueError):
     """Invalid RAG pipeline input."""
@@ -93,7 +99,7 @@ class RagPipeline:
 
     def __init__(
         self,
-        retriever: Retriever,
+        retriever: Retriever | None,
         api_client: ApiClient,
         *,
         top_k: int = TOP_K,
@@ -108,7 +114,7 @@ class RagPipeline:
             raise RagError("top_k must be positive")
         self.retriever = retriever
         self.api = api_client
-        self.top_k = top_k
+        self.top_k = top_k if retriever is not None else 0
         self.chunk_type = chunk_type
         self.chunk_size = chunk_size
         self.overlap = overlap
@@ -126,10 +132,19 @@ class RagPipeline:
     ) -> RagResult:
         if not query_id:
             raise RagError("query_id must not be empty")
-        hits = self.retriever.search(question, top_k=self.top_k)
-        context = build_context(hits)
-        messages = build_messages(question, context)
-        request_id = f"{query_id}|{self.chunk_type}|{self.retriever.name}"
+        if not isinstance(question, str) or not question.strip():
+            raise RagError("question must be a non-empty string")
+        if self.retriever is None:
+            hits = []
+            messages = [
+                {"role": "system", "content": NO_RAG_SYSTEM_PROMPT},
+                {"role": "user", "content": f"Question: {question}\n\nAnswer:"},
+            ]
+        else:
+            hits = self.retriever.search(question, top_k=self.top_k)
+            messages = build_messages(question, build_context(hits))
+        retriever_name = self.retriever.name if self.retriever is not None else "none"
+        request_id = f"{query_id}|{self.chunk_type}|{retriever_name}"
         gen = self.api.generate(messages, request_id=request_id)
 
         retrieved_chunk_ids = [hit.chunk.chunk_id for hit in hits]
@@ -142,8 +157,8 @@ class RagPipeline:
             chunk_type=self.chunk_type,
             chunk_size=self.chunk_size,
             overlap=self.overlap,
-            retriever=self.retriever.name,
-            retriever_version=self.retriever.version,
+            retriever=retriever_name,
+            retriever_version=self.retriever.version if self.retriever is not None else "no-rag-v1",
             top_k=self.top_k,
             poison_ratio=self.poison_ratio,
             poison_version=self.poison_version,
