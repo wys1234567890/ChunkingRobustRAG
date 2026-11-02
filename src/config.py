@@ -34,6 +34,7 @@ class ApiSettings:
     prompt_version: str = "rag-v1"
     input_price_per_1k: float | None = None
     output_price_per_1k: float | None = None
+    judge_thinking: str | None = None
 
     def validate(self, *, require_credentials: bool = False) -> None:
         """Validate values, optionally requiring credentials for live calls."""
@@ -48,6 +49,8 @@ class ApiSettings:
 
         if self.temperature < 0:
             raise ConfigError("temperature must be >= 0")
+        if self.judge_thinking not in {None, "enabled", "disabled"}:
+            raise ConfigError("judge_thinking must be enabled, disabled, or empty")
         if self.max_tokens <= 0:
             raise ConfigError("max_tokens must be > 0")
         if self.timeout_seconds <= 0:
@@ -89,6 +92,7 @@ _DEFAULTS: dict[str, Any] = {
     "judge_api_base": None,
     "judge_api_key": None,
     "judge_model": None,
+    "judge_thinking": None,
     "temperature": 0.0,
     "max_tokens": 1024,
     "timeout_seconds": 60.0,
@@ -108,6 +112,7 @@ _ENV_TO_FIELD = {
     "JUDGE_API_BASE": "judge_api_base",
     "JUDGE_API_KEY": "judge_api_key",
     "JUDGE_MODEL": "judge_model",
+    "JUDGE_THINKING": "judge_thinking",
     "TEMPERATURE": "temperature",
     "MAX_TOKENS": "max_tokens",
     "TIMEOUT_SECONDS": "timeout_seconds",
@@ -152,6 +157,8 @@ def _yaml_values(data: Mapping[str, Any]) -> dict[str, Any]:
 def _coerce(field: str, value: Any) -> Any:
     if value is None:
         return None
+    if field == "judge_thinking":
+        return str(value).strip().lower() or None
     if field in {"temperature", "timeout_seconds", "input_price_per_1k", "output_price_per_1k"}:
         try:
             return float(value)

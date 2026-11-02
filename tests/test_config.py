@@ -60,3 +60,22 @@ def test_numeric_validation(field: str, value: str, message: str):
     with pytest.raises(ConfigError, match=message):
         load_settings(environ={field: value}, dotenv_path=None)
 
+
+@pytest.mark.parametrize("value,expected", [("disabled", "disabled"), (" ENABLED ", "enabled"), ("", None)])
+def test_judge_thinking_configuration(value, expected):
+    settings = load_settings(environ={"JUDGE_THINKING": value}, dotenv_path=None)
+    assert settings.judge_thinking == expected
+
+
+def test_invalid_judge_thinking_is_rejected():
+    with pytest.raises(ConfigError, match="judge_thinking"):
+        load_settings(environ={"JUDGE_THINKING": "false"}, dotenv_path=None)
+
+
+def test_judge_thinking_environment_overrides_dotenv_and_yaml(tmp_path):
+    config, dotenv = tmp_path / "api.yaml", tmp_path / ".env"
+    config.write_text("api:\n  judge_thinking: enabled\n", encoding="utf-8")
+    dotenv.write_text("JUDGE_THINKING=disabled\n", encoding="utf-8")
+    assert load_settings(config, environ={}, dotenv_path=dotenv).judge_thinking == "disabled"
+    assert load_settings(config, environ={"JUDGE_THINKING": "enabled"}, dotenv_path=dotenv).judge_thinking == "enabled"
+

@@ -237,3 +237,26 @@ def test_cached_requests_do_not_double_count_cost_and_tokens(settings):
     assert second["judge_input_tokens"] == second["judge_output_tokens"] == second["judge_estimated_cost"] == 0
     assert details[0]["judge_metadata"]["latency_ms"] == 0
     assert len(calls) == 1
+
+
+def test_judge_thinking_is_sent_recorded_and_isolated_in_cache(settings):
+    for mode in [None, "enabled", "disabled"]:
+        configured = replace(settings, judge_thinking=mode)
+        client, calls = client_with_responses(configured, [verdict()])
+        summary, _ = evaluate_answers_with_judge([query()], [record()], client)
+        assert len(calls) == 1 and summary["judge_cache_hits"] == 0
+        assert summary["judge_parameters"]["thinking"] == mode
+        if mode is None:
+            assert "extra_body" not in calls[0]
+        else:
+            assert calls[0]["extra_body"] == {"thinking": {"type": mode}}
+        again, _ = evaluate_answers_with_judge([query()], [record()], client)
+        assert again["judge_cache_hits"] == 1 and len(calls) == 1
+
+
+def test_judge_thinking_does_not_change_generation_requests_or_cache(settings):
+    default = ApiClient(settings)
+    configured = ApiClient(replace(settings, judge_thinking="disabled"))
+    messages = [{"role": "user", "content": "question"}]
+    assert default.make_cache_key(messages) == configured.make_cache_key(messages)
+    assert configured._request_options() == {}

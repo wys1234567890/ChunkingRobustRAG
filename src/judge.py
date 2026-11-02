@@ -85,6 +85,9 @@ def evaluate_answers_with_judge(
                 "latency_ms": 0 if result.cache_hit else result.latency_ms,
                 "input_tokens": result.input_tokens, "output_tokens": result.output_tokens,
                 "estimated_cost": 0.0 if result.cache_hit else result.estimated_cost,
+                "finish_reason": result.finish_reason,
+                "reasoning_tokens": result.reasoning_tokens,
+                "has_reasoning_content": result.has_reasoning_content,
             }
             detail["judge_status"] = "error"
             if result.status != "success":
@@ -110,6 +113,7 @@ def evaluate_answers_with_judge(
         evaluation_version=EVALUATION_VERSION, judge_prompt_version=PROMPT_VERSION,
         judge_model=client.model,
         judge_parameters={"temperature": client.settings.temperature, "max_tokens": client.settings.max_tokens,
+                          "thinking": client.settings.judge_thinking,
                           "timeout_seconds": client.settings.timeout_seconds, "max_retries": client.settings.max_retries},
         judge_successful_queries=completed, judge_error_queries=failed,
         judge_skipped_queries=len(details) - completed - failed, judge_correct_queries=correct,

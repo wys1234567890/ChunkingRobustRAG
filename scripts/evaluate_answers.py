@@ -35,7 +35,8 @@ def main(argv=None) -> int:
             from src.judge import create_judge_client, evaluate_answers_with_judge
 
             client = create_judge_client(load_settings(args.config))
-            print(f"Judge model={client.model}; temperature=0; API calls enabled", flush=True)
+            print(f"Judge model={client.model}; temperature=0; "
+                  f"thinking={client.settings.judge_thinking or 'provider-default'}; API calls enabled", flush=True)
             summary, details = evaluate_answers_with_judge(
                 queries, records, client,
                 progress=lambda done, total, d: print(

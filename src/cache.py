@@ -17,6 +17,7 @@ def build_cache_key(
     max_tokens: int,
     prompt_version: str,
     config_version: str,
+    request_options: Mapping[str, Any] | None = None,
 ) -> str:
     payload = {
         "messages": list(messages),
@@ -26,6 +27,8 @@ def build_cache_key(
         "prompt_version": prompt_version,
         "config_version": config_version,
     }
+    if request_options:
+        payload["request_options"] = dict(request_options)
     canonical = json.dumps(
         payload,
         ensure_ascii=False,

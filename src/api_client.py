@@ -33,6 +33,9 @@ class GenerationResult:
     output_tokens: int | None
     estimated_cost: float | None
     error_code: str | None
+    finish_reason: str | None = None
+    reasoning_tokens: int | None = None
+    has_reasoning_content: bool = False
 
 
 class ApiClient:
@@ -60,6 +63,11 @@ class ApiClient:
             max_retries=0,
         )
 
+    def _request_options(self) -> dict[str, Any]:
+        if self.role == "judge" and self.settings.judge_thinking is not None:
+            return {"extra_body": {"thinking": {"type": self.settings.judge_thinking}}}
+        return {}
+
     def make_cache_key(
         self,
         messages: Sequence[Message],
@@ -74,6 +82,7 @@ class ApiClient:
             max_tokens=self.settings.max_tokens,
             prompt_version=prompt_version or self.settings.prompt_version,
             config_version=config_version or self.settings.config_version,
+            request_options=self._request_options(),
         )
 
     def generate(
@@ -103,6 +112,7 @@ class ApiClient:
                     messages=list(messages),
                     temperature=self.settings.temperature,
                     max_tokens=self.settings.max_tokens,
+                    **self._request_options(),
                 )
                 result = self._response_result(response, request_id, retries, started)
                 if result.error_code == "empty_response" and retries < self.settings.max_retries:
@@ -145,35 +155,32 @@ class ApiClient:
         started: float,
     ) -> GenerationResult:
         choices = getattr(response, "choices", None) or []
-        if not choices:
-            return self._error_result(request_id, retry_count, started, "empty_response")
-        message = getattr(choices[0], "message", None)
+        choice = choices[0] if choices else None
+        message = getattr(choice, "message", None)
         text = getattr(message, "content", None) if message is not None else None
-        if not isinstance(text, str) or not text.strip():
-            return self._error_result(request_id, retry_count, started, "empty_response")
-
-        finish_reason = getattr(choices[0], "finish_reason", None)
+        text = text if isinstance(text, str) else ""
+        finish_reason = getattr(choice, "finish_reason", None)
         usage = getattr(response, "usage", None)
         input_tokens = getattr(usage, "prompt_tokens", None)
         output_tokens = getattr(usage, "completion_tokens", None)
+        token_details = getattr(usage, "completion_tokens_details", None)
+        reasoning_tokens = getattr(token_details, "reasoning_tokens", None)
+        has_reasoning = bool(getattr(message, "reasoning_content", None))
+        error_code = None
+        # Inspect termination before text: a reasoning-only truncated response
+        # must not be misclassified as a transient empty response.
         if finish_reason == "length":
-            return GenerationResult(
-                text=text,
-                status="error",
-                model=self.model,
-                request_id=request_id,
-                cache_hit=False,
-                retry_count=retry_count,
-                latency_ms=self._elapsed_ms(started),
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                estimated_cost=self._cost(input_tokens, output_tokens),
-                error_code="truncated_response",
-            )
+            error_code = "truncated_response"
+        elif finish_reason == "content_filter":
+            error_code = "content_filtered"
+        elif getattr(message, "refusal", None):
+            error_code = "refusal"
+        elif not text.strip():
+            error_code = "empty_response"
 
         return GenerationResult(
             text=text,
-            status="success",
+            status="error" if error_code else "success",
             model=self.model,
             request_id=request_id,
             cache_hit=False,
@@ -182,7 +189,10 @@ class ApiClient:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             estimated_cost=self._cost(input_tokens, output_tokens),
-            error_code=None,
+            error_code=error_code,
+            finish_reason=finish_reason,
+            reasoning_tokens=reasoning_tokens,
+            has_reasoning_content=has_reasoning,
         )
 
     def _error_result(
@@ -261,6 +271,9 @@ class ApiClient:
                 "input_tokens": result.input_tokens,
                 "output_tokens": result.output_tokens,
                 "error_code": result.error_code,
+                "finish_reason": result.finish_reason,
+                "reasoning_tokens": result.reasoning_tokens,
+                "has_reasoning_content": result.has_reasoning_content,
             },
         )
 

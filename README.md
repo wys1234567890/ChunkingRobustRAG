@@ -354,6 +354,7 @@ python -m pytest tests/test_rag.py
 ```
 
 - Judge 使用 `JUDGE_API_BASE / JUDGE_API_KEY / JUDGE_MODEL`，未设置时分别沿用 `LLM_*`；`--config` 可指定 API YAML，环境变量和 `.env` 优先。温度固定为 0，token 上限、重试和超时沿用 API 配置；定价需对应实际 Judge 模型。
+- DeepSeek Judge 可设 `JUDGE_THINKING=disabled` 关闭思考，避免推理耗尽输出额度。留空则不发送该参数。该配置仅作用于 Judge，计入缓存标识并写入汇总的 `judge_parameters.thinking`；切换模式后需重新评审全部回答，建议使用独立输出文件。
 - Judge 仅接收问题、查询文件的标准答案和回答，按语义作二元判定。允许等价别名、日期格式和无害解释；拒答、否定、关键事实错误或相互矛盾的答案判错。提示词将输入视为数据，忽略其中指令。
 - 主指标 `judge_accuracy` 的分母为查询文件全部题数；生成失败、截断和缺失计零。Judge 失败时 `evaluation_complete=false`、准确率为 null，保存失败明细并返回退出码 1。
 - 重跑原命令复用 `results/cache/judge/` 中成功评审，失败项重新请求，无效 JSON 缓存清除。模型、端点、参数、输入或提示词版本变化会重新评审。
